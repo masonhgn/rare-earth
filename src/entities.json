@@ -1,0 +1,7 @@
+{
+    "player": {
+        "grid": [["player"]],
+        "spawn": [200,200],
+        "tile_locked": false
+    }
+}

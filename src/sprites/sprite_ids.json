@@ -1,0 +1,13 @@
+{
+    "metadata": {
+        "sprite_file_name": "default.png"
+    },
+
+    "sprite_ids": {
+        "grass": [0,0],
+        "sand": [0,1],
+        "rock": [0,2],
+        "player": [0,3]
+    }
+
+}
