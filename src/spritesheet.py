@@ -9,7 +9,7 @@ class SpriteSheet:
         self.tile_length = tile_length
         self.sheet = pg.image.load(sprite_sheet_file).convert_alpha()
         with open(sprite_id_file, 'r') as file:
-            self.sprite_ids = json.load(file)['sprite_ids']
+            self.sprite_ids = json.load(file)
 
     def get_tile(self, rect):
         rect = pg.Rect(rect)

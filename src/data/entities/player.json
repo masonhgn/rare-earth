@@ -1,0 +1,6 @@
+{
+    "grid": [["player"]],
+    "tile_locked": false,
+    "editable": false,
+    "speed": 200
+}

@@ -1,26 +1,19 @@
-import json
+
+ENTITIES_DIR = 'src/data/entities'
+SPRITE_SHEET_FILE = 'src/data/spritesheet.png'
+SPRITE_SHEET_ID_FILE = 'src/data/sprites.json'
 
 
-
-MAP_FILE = 'map/map1.txt'
-
+FPS = 60
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
-SPRITE_SHEET_FILE = 'sprites/default.png'
-SPRITE_SHEET_ID_FILE = 'sprites/sprite_ids.json'
 TILE_LENGTH = 64 #game tiles are 64 pixels * 64 pixels
 
 
 PLAYER_SPAWN = (200,200)
-PLAYER_TILES = [['player']]
-
-
-def load_entity_metadata(file_name):
-    with open(file_name, 'r') as file:
-        payload = json.load(file)
-    return payload
+PLAYER_REACH_TILES = 4
 
 
 
 
-ENTITY_METADATA = load_entity_metadata('entities.json')
+
 

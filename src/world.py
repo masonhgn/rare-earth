@@ -2,7 +2,7 @@
 import random
 from entity import Entity
 from config import *
-from player import Player
+from prototype import load_prototype
 
 
 
@@ -47,8 +47,8 @@ class World:
 
 
     def spawn_player(self):
-        player = Player(PLAYER_SPAWN)
-        self.add_entity(player)
+        proto = load_prototype("player")
+        self.add_entity(Entity(proto, PLAYER_SPAWN, entity_id="player"))
 
 
     def get_player(self):

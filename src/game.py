@@ -42,7 +42,7 @@ class Game:
             #render world
             self.screen.render(self.world.map_grid, 0,0,vc)
 
-            self.screen.render(player.grid,player.world_x, player.world_y, vc)
+            self.screen.render(player.prototype.grid, player.world_x, player.world_y, vc)
 
             # flip() the display to put your work on screen
             pg.display.flip()
@@ -79,7 +79,7 @@ class Game:
 
 
         player = self.world.get_player()
-        speed = player.walk_speed * self.dt
+        speed = player.prototype.speed * self.dt
 
         keys = pg.key.get_pressed()
         if keys[pg.K_w]:

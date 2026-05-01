@@ -3,13 +3,8 @@ import uuid
 
 
 
-
-
-
-
-
 class Entity:
-    def __init__(self, world_pos, grid, tile_locked, entity_id=None):
+    def __init__(self, prototype, world_pos, entity_id=None):
         '''
         an Entity is a thing that can be rendered via multiple
         different sprites, arranged in a specific grid.
@@ -31,21 +26,23 @@ class Entity:
         should be able to move pixel by pixel. (like players, mobs, etc)
         
         '''
-        self.id = uuid.uuid4() if not entity_id else entity_id
-        self.tile_locked = tile_locked
+
+        self.prototype = prototype
+        self.id = entity_id if entity_id else uuid.uuid4()
+        
         self.world_x, self.world_y = world_pos
-        self.grid = grid #a 2d array of sprite ids 
+
         
 
 
 
     def move_continuous(self, x,y):
-        if self.tile_locked: return # this is not the right function
+        if self.prototype.tile_locked: return # this is not the right function
         self.world_x += x
         self.world_y += y
 
-    def move_discrete(self,x,y):
-        '''something for moving by tiles rather than pixels'''
+    def move_discrete(self,x,y): #moving by tiles instead of pixels
+        if not self.prototype.tile_locked: return
         self.world_x += x * TILE_LENGTH
         self.world_y += y * TILE_LENGTH
 
