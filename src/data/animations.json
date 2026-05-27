@@ -1,0 +1,26 @@
+{
+    "player_idle": {
+        "file": "src/data/sprites/player/idle.png",
+        "frames": 4,
+        "size": [128, 128],
+        "margin": 1,
+        "spacing": 1,
+        "fps": 3
+    },
+    "player_walking_right": {
+        "file": "src/data/sprites/player/walking_right.png",
+        "frames": 4,
+        "size": [128, 128],
+        "margin": 1,
+        "spacing": 1,
+        "fps": 7
+    },
+    "player_walking_left": {
+        "file": "src/data/sprites/player/walking_left.png",
+        "frames": 4,
+        "size": [128, 128],
+        "margin": 1,
+        "spacing": 1,
+        "fps": 7
+    }
+}

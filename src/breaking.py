@@ -1,0 +1,269 @@
+
+# break-and-drag-mining subsystem.
+#
+# owns the in-progress break state (which entity/overlay tile is being
+# broken, when it started, how long it takes), the drag-mining mode flag
+# (on while the user holds left after starting a break), and the
+# particle list (debris chunks spawned at completion).
+#
+# the game-loop calls `tick(dt)` once per frame; the renderer calls
+# `visuals_for_entity` / `visuals_for_overlay_tile` to get jitter+flash
+# values for break-target sprites, and `queue_progress_bar` /
+# `queue_particles` to draw the bar and chunks.
+#
+# external mutation surface is small:
+#   - try_acquire_target(tile)       what's breakable here? (also used by the click)
+#   - start_break(proto, tile, ...)  begin a break on the given tile
+#   - cancel()                       called on MOUSEBUTTONUP
+
+import random
+
+import pygame as pg
+
+from config import TILE_LENGTH
+from effects import BreakState, Particle, spawn_break_chunks
+from item import roll_drops
+from prototype import load_prototype
+from world import world_to_tile, tile_center
+
+
+class BreakSystem:
+    def __init__(self, world, camera, minimap):
+        self.world = world
+        self.camera = camera
+        self.minimap = minimap
+
+        self.breaking: BreakState | None = None
+        self.particles: list[Particle] = []
+        # last polled cursor screen pos. used to detect actual mouse motion
+        # versus camera-driven world-position drift, so we only drag-retarget
+        # when the user genuinely moves the mouse.
+        self._last_cursor_pos: tuple[int, int] | None = None
+        # drag-mining mode: while True, the per-frame poll auto-starts a new
+        # break whenever the current one finishes and the cursor is over
+        # another breakable tile. set on start_break, cleared on cancel().
+        self._drag_mining: bool = False
+
+    # --- public api ---
+
+    def try_acquire_target(self, tile: tuple[int, int]):
+        # returns (prototype, entity_id_or_None) for whatever's breakable at
+        # `tile`, or None. entity_id is set for placed entities; None for
+        # overlay tiles whose stats come from a prototype with the same
+        # name as the sprite_id.
+        tx, ty = tile
+        if not self.world.tile_in_reach(tx, ty):
+            return None
+        entity = self.world.get_entity_at_tile(tx, ty)
+        if entity is not None and entity.prototype.editable:
+            return (entity.prototype, entity.id)
+        overlay_id = self.world.overlay_at(tx, ty)
+        if overlay_id is None:
+            return None
+        try:
+            proto = load_prototype(overlay_id)
+        except FileNotFoundError:
+            return None
+        if not proto.editable:
+            return None
+        return (proto, None)
+
+    def start_break(self, proto, tile: tuple[int, int], *, entity_id: str | None) -> None:
+        break_time = proto.break_time or 0.0
+        center = tile_center(tile)
+        if break_time <= 0:
+            # instant break: finalize immediately, no BreakState lifecycle.
+            if entity_id is not None:
+                self._finalize_entity(entity_id, center)
+            else:
+                self._finalize_overlay(tile, center)
+            self.breaking = None
+            return
+        self.breaking = BreakState(
+            start_ms=pg.time.get_ticks(),
+            duration_ms=int(break_time * 1000),
+            tile=tile,
+            entity_id=entity_id,
+        )
+        self._last_cursor_pos = pg.mouse.get_pos()
+        self._drag_mining = True
+
+    def cancel(self) -> None:
+        self.breaking = None
+        self._drag_mining = False
+        self._last_cursor_pos = None
+
+    def tick(self, dt: float) -> None:
+        self._tick_drag_start()
+        self._tick_active_break()
+        self._tick_particles(dt)
+
+    # --- visuals (called by the game's render queueing) ---
+
+    def visuals_for_entity(self, entity_id: str, now_ms: int) -> tuple[int, int, int]:
+        # returns (jx, jy, flash_alpha). all zero when this entity isn't the
+        # current break target, so callers can blindly apply the offsets and
+        # skip the flash overlay only when alpha > 0.
+        if self.breaking is None or self.breaking.entity_id != entity_id:
+            return (0, 0, 0)
+        return self._compute_visuals(now_ms)
+
+    def visuals_for_overlay_tile(self, tile: tuple[int, int], now_ms: int) -> tuple[int, int, int]:
+        if (self.breaking is None
+                or self.breaking.entity_id is not None
+                or self.breaking.tile != tile):
+            return (0, 0, 0)
+        return self._compute_visuals(now_ms)
+
+    def queue_progress_bar(self, renderer, camera) -> None:
+        # thin bar above the breaking tile. for entity targets, follow the
+        # entity's render_offset so the bar sits above the *visible* sprite
+        # rather than the bare tile (matters for offset-anchored sprites
+        # like trees).
+        bk = self.breaking
+        if bk is None:
+            return
+        ox, oy = 0, 0
+        if bk.entity_id is not None:
+            entity = self.world.entities.get(bk.entity_id)
+            if entity is not None and entity.prototype.render_offset is not None:
+                ox, oy = entity.prototype.render_offset
+        progress = bk.progress(pg.time.get_ticks())
+        tx, ty = bk.tile
+        sx, sy = camera.world_to_screen((tx * TILE_LENGTH + ox, ty * TILE_LENGTH + oy))
+        bar_w = TILE_LENGTH - 8
+        bar_h = 4
+        bar_x = sx + 4
+        bar_y = sy - 8
+        bg = pg.Surface((bar_w, bar_h), pg.SRCALPHA)
+        bg.fill((0, 0, 0, 200))
+        renderer.queue('highlight', bg, (bar_x, bar_y))
+        fill_w = int(bar_w * progress)
+        if fill_w > 0:
+            fill = pg.Surface((fill_w, bar_h), pg.SRCALPHA)
+            fill.fill((255, 220, 80, 240))
+            renderer.queue('highlight', fill, (bar_x, bar_y))
+
+    def queue_particles(self, renderer, camera, culling) -> None:
+        if not self.particles:
+            return
+        now_ms = pg.time.get_ticks()
+        for p in self.particles:
+            if not culling.point_visible((p.world_x, p.world_y), camera.offset, size=(p.size, p.size)):
+                continue
+            life = (now_ms - p.born_ms) / max(p.lifetime_ms, 1)
+            alpha = max(0, int(255 * (1 - life)))
+            surf = pg.Surface((p.size, p.size), pg.SRCALPHA)
+            surf.fill((*p.color, alpha))
+            sx, sy = camera.world_to_screen((p.world_x, p.world_y))
+            renderer.queue('highlight', surf, (sx, sy))
+
+    # --- private ---
+
+    def _compute_visuals(self, now_ms: int) -> tuple[int, int, int]:
+        # jitter amplitude + white flash alpha, ramping with progress so the
+        # target rattles harder as it nears breaking.
+        progress = self.breaking.progress(now_ms)
+        amp = 1 + int(progress * 3)
+        jx = random.randint(-amp, amp)
+        jy = random.randint(-amp, amp)
+        flash_alpha = int(25 + progress * 95)
+        return (jx, jy, flash_alpha)
+
+    def _finalize_entity(self, entity_id: str, world_pos: tuple[float, float]) -> None:
+        drops = self.world.break_entity(entity_id)
+        self._distribute_drops(drops, world_pos)
+
+    def _finalize_overlay(self, tile: tuple[int, int], world_pos: tuple[float, float]) -> None:
+        tx, ty = tile
+        tile_id = self.world.overlay_at(tx, ty)
+        if tile_id is None:
+            return
+        try:
+            proto = load_prototype(tile_id)
+        except FileNotFoundError:
+            return
+        self.world.overlay_grid[ty][tx] = None
+        self.minimap.rebuild()
+        self._distribute_drops(roll_drops(proto.drops), world_pos)
+
+    def _distribute_drops(self, drops: list[tuple[str, int]], world_pos: tuple[float, float]) -> None:
+        # drops spawn in the world (visible at the break site), auto-pickup
+        # in Game._update sweeps them into inventory when the player walks
+        # over them.
+        for item_id, qty in drops:
+            self.world.spawn_dropped_item(item_id, qty, world_pos)
+        self.particles.extend(spawn_break_chunks(world_pos, pg.time.get_ticks()))
+
+    def _tick_drag_start(self) -> None:
+        # while drag-mining is on and the button is held, keep starting new
+        # breaks on whatever's under the cursor. covers the gap between one
+        # break finishing and the next being clicked, so a sweep through an
+        # ore patch doesn't stall after the first tile breaks.
+        if not self._drag_mining:
+            return
+        if not pg.mouse.get_pressed()[0]:
+            self._drag_mining = False
+            self._last_cursor_pos = None
+            return
+        if self.breaking is not None:
+            return
+        cursor = pg.mouse.get_pos()
+        wx, wy = self.camera.screen_to_world(cursor)
+        tile = world_to_tile((wx, wy))
+        target = self.try_acquire_target(tile)
+        if target is None:
+            return
+        proto, entity_id = target
+        self.start_break(proto, tile, entity_id=entity_id)
+
+    def _tick_active_break(self) -> None:
+        bk = self.breaking
+        if bk is None:
+            self._last_cursor_pos = None
+            return
+        # target liveness
+        if bk.entity_id is not None:
+            if bk.entity_id not in self.world.entities:
+                self.breaking = None
+                return
+        else:
+            if self.world.overlay_at(*bk.tile) is None:
+                self.breaking = None
+                return
+        if not self.world.tile_in_reach(*bk.tile):
+            self.breaking = None
+            return
+
+        # drag-retarget on actual cursor motion (screen pos change). polling
+        # avoids depending on MOUSEMOTION events being delivered, and the
+        # screen-pos check filters out camera-driven world drift.
+        cursor = pg.mouse.get_pos()
+        if self._last_cursor_pos is not None and cursor != self._last_cursor_pos:
+            wx, wy = self.camera.screen_to_world(cursor)
+            cur_tile = world_to_tile((wx, wy))
+            if cur_tile != bk.tile:
+                target = self.try_acquire_target(cur_tile)
+                if target is not None:
+                    proto, entity_id = target
+                    self.start_break(proto, cur_tile, entity_id=entity_id)
+                    self._last_cursor_pos = cursor
+                    return
+        self._last_cursor_pos = cursor
+
+        now_ms = pg.time.get_ticks()
+        if bk.is_complete(now_ms):
+            center = tile_center(bk.tile)
+            if bk.entity_id is not None:
+                self._finalize_entity(bk.entity_id, center)
+            else:
+                self._finalize_overlay(bk.tile, center)
+            self.breaking = None
+
+    def _tick_particles(self, dt: float) -> None:
+        if not self.particles:
+            return
+        now_ms = pg.time.get_ticks()
+        for p in self.particles:
+            p.tick(dt)
+        self.particles = [p for p in self.particles if p.alive(now_ms)]

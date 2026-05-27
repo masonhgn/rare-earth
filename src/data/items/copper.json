@@ -1,0 +1,6 @@
+{
+    "id": "copper",
+    "name": "Copper",
+    "image": "src/data/sprites/items/copper.png",
+    "stack_limit": 100
+}

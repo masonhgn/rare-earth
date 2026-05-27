@@ -1,0 +1,9 @@
+{
+    "grid": [["coal_ore"]],
+    "tile_locked": true,
+    "editable": true,
+    "break_time": 0.35,
+    "drops": [
+        {"item": "coal", "quantity": [1, 3]}
+    ]
+}

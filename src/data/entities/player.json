@@ -1,6 +1,17 @@
 {
-    "grid": [["player"]],
+    "grid": [["grass"]],
     "tile_locked": false,
     "editable": false,
-    "speed": 200
+    "speed": 400,
+    "animation": {
+        "default_state": "idle",
+        "states": {
+            "idle": "player_idle",
+            "walking_right": "player_walking_right",
+            "walking_left": "player_walking_left"
+        }
+    },
+    "shadow": true,
+    "sprite_size": [128, 128],
+    "hitbox": [48, 80]
 }

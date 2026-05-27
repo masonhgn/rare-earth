@@ -1,5 +1,9 @@
 {
     "grid": [["rock"]],
     "tile_locked": true,
-    "editable": true
+    "editable": true,
+    "break_time": 0.3,
+    "drops": [
+        {"item": "rock_chunk", "quantity": 1}
+    ]
 }

@@ -1,6 +1,28 @@
 {
-    "grass": [0,0],
-    "sand": [0,1],
-    "rock": [0,2],
-    "player": [0,3]
+    "atlas": {
+        "file": "src/data/sprites/tileset.png",
+        "tile_size": 64,
+        "margin": 1,
+        "spacing": 1,
+        "sprites": {
+            "cobble": [0, 0],
+            "sand": [1, 0],
+            "brick": [2, 0],
+            "cinder": [3, 0],
+            "rock": [4, 0],
+            "grass": [5, 0],
+            "planks": [6, 0]
+        }
+    },
+    "files": {
+        "tree": "src/data/sprites/tree.png",
+        "copper_ore": {
+            "file": "src/data/sprites/tiles/copper_ore.png",
+            "size": [64, 64]
+        },
+        "coal_ore": {
+            "file": "src/data/sprites/tiles/coal_ore.png",
+            "size": [64, 64]
+        }
+    }
 }
