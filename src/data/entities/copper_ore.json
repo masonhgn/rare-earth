@@ -4,6 +4,6 @@
     "editable": true,
     "break_time": 0.45,
     "drops": [
-        {"item": "copper", "quantity": [1, 3]}
+        {"item": "copper_ore", "quantity": [1, 3]}
     ]
 }

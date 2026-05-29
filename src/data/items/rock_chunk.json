@@ -1,6 +1,5 @@
 {
     "id": "rock_chunk",
     "name": "Rock Chunk",
-    "image": "src/data/sprites/items/copper.png",
-    "stack_limit": 64
+    "image": "src/data/sprites/items/copper.png"
 }

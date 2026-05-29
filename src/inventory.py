@@ -8,9 +8,9 @@
 # slot_at_pixel converts a screen-space mouse position into a slot index,
 # returning None if the click is outside the panel or on a slot border.
 #
-# stacking is enforced per item via ItemPrototype.stack_limit. add_item
-# fills existing matching stacks first, then empty slots, and returns
-# the leftover quantity that couldn't fit.
+# items stack without limit — add_item always fills the first matching
+# stack (or empty slot) and returns 0. the leftover return remains for
+# api shape consistency with code that branches on full inventories.
 
 import pygame as pg
 
@@ -19,7 +19,7 @@ from config import (
     INVENTORY_SLOT_PX, INVENTORY_BORDER_PX, INVENTORY_UI_FILE,
     INVENTORY_ICON_SIZE,
 )
-from item import load_item, format_quantity, get_item_icon
+from item import format_quantity, get_item_icon, load_item
 from resources import load_image
 
 
@@ -70,32 +70,30 @@ class Inventory:
     # --- mutation ---
 
     def add_item(self, item_id: str, quantity: int) -> int:
-        # fill matching stacks first (so we don't open a new slot when an
-        # existing one has room), then fall through to empty slots.
-        # returns leftover quantity that didn't fit (0 if all added).
-        remaining = quantity
-        matching = [i for i, s in enumerate(self.slots) if s and s['item_id'] == item_id]
-        empty = [i for i, s in enumerate(self.slots) if s is None]
-        for i in matching + empty:
-            if remaining <= 0:
-                break
-            remaining = self.add_to_slot(item_id, remaining, i)
-        return remaining
+        # stack_limit was removed (items stack without cap), so we either
+        # find a matching stack or grab the first empty slot. returns
+        # leftover only if the inventory is full of mismatched stacks.
+        for i, slot in enumerate(self.slots):
+            if slot and slot['item_id'] == item_id:
+                slot['quantity'] += quantity
+                return 0
+        for i, slot in enumerate(self.slots):
+            if slot is None:
+                self.slots[i] = {'item_id': item_id, 'quantity': quantity}
+                return 0
+        return quantity
 
     def add_to_slot(self, item_id: str, quantity: int, slot_index: int) -> int:
-        # add into a specific slot, capped by stack_limit. returns leftover.
-        # callers (add_item, handle_click) only call this with an empty slot
-        # or a slot whose item_id matches — mismatches are routed elsewhere.
-        proto = load_item(item_id)
+        # add into a specific slot. no stack cap: returns leftover only for
+        # the mismatch case, which callers (handle_click) route to a swap.
         slot = self.slots[slot_index]
         if slot is None:
-            take = min(proto.stack_limit, quantity)
-            self.slots[slot_index] = {'item_id': item_id, 'quantity': take}
-            return quantity - take
-        space = proto.stack_limit - slot['quantity']
-        take = min(space, quantity)
-        slot['quantity'] += take
-        return quantity - take
+            self.slots[slot_index] = {'item_id': item_id, 'quantity': quantity}
+            return 0
+        if slot['item_id'] != item_id:
+            return quantity
+        slot['quantity'] += quantity
+        return 0
 
     def take_from_slot(self, slot_index: int) -> dict | None:
         # remove and return the entire stack in `slot_index`, or None if empty.
@@ -112,8 +110,7 @@ class Inventory:
         #   not holding, slot empty   -> noop, hand stays empty
         #   not holding, slot has X   -> pick up X, slot becomes empty
         #   holding A, slot empty     -> drop A into slot
-        #   holding A, slot has A     -> merge into slot up to stack_limit;
-        #                                any overflow stays in hand
+        #   holding A, slot has A     -> merge into slot (no cap)
         #   holding A, slot has B     -> swap (A goes to slot, B comes to hand)
         slot = self.slots[slot_index]
 
@@ -122,14 +119,11 @@ class Inventory:
                 return None
             return self.take_from_slot(slot_index)
 
-        # empty slot OR same-item slot: same path. routing both through
-        # add_to_slot enforces stack_limit locally so we don't depend on the
-        # caller having already capped held['quantity'].
+        # empty slot OR same-item slot: same path. always consumes the
+        # entire held stack since there's no cap.
         if slot is None or slot['item_id'] == held['item_id']:
-            leftover = self.add_to_slot(held['item_id'], held['quantity'], slot_index)
-            if leftover <= 0:
-                return None
-            return {'item_id': held['item_id'], 'quantity': leftover}
+            self.add_to_slot(held['item_id'], held['quantity'], slot_index)
+            return None
 
         # different item: swap
         new_held = slot

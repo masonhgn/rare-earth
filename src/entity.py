@@ -22,6 +22,24 @@ class Entity:
                 states=prototype.animation['states'],
             )
 
+        # active pathfinding waypoints, in order, populated by the click-to-walk
+        # handler. each frame the player walks toward path[0]'s tile center,
+        # popping when within ~arrival_threshold pixels. None / empty = idle.
+        self.path: list[tuple[int, int]] = []
+
+        # per-entity machine state. None for non-machine entities. shape:
+        #   {input_slots: [slot|None], output_slots: [slot|None],
+        #    current_recipe: id|None, started_ms: int}
+        # FactorySystem ticks any entity with this populated.
+        self.machine_state: dict | None = None
+        if prototype.machine is not None:
+            self.machine_state = {
+                'input_slots': [None] * prototype.machine['input_slots'],
+                'output_slots': [None] * prototype.machine['output_slots'],
+                'current_recipe': None,
+                'started_ms': 0,
+            }
+
     def move_continuous(self, dx: float, dy: float) -> None:
         if self.prototype.tile_locked:
             return

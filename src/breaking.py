@@ -1,12 +1,11 @@
 
-# break-and-drag-mining subsystem.
+# break subsystem.
 #
 # owns the in-progress break state (which entity/overlay tile is being
-# broken, when it started, how long it takes), the drag-mining mode flag
-# (on while the user holds left after starting a break), and the
-# particle list (debris chunks spawned at completion).
+# broken, when it started, how long it takes) and the particle list
+# (debris chunks spawned at completion).
 #
-# the game-loop calls `tick(dt)` once per frame; the renderer calls
+# the game loop calls `tick(dt)` once per frame; the renderer calls
 # `visuals_for_entity` / `visuals_for_overlay_tile` to get jitter+flash
 # values for break-target sprites, and `queue_progress_bar` /
 # `queue_particles` to draw the bar and chunks.
@@ -14,7 +13,7 @@
 # external mutation surface is small:
 #   - try_acquire_target(tile)       what's breakable here? (also used by the click)
 #   - start_break(proto, tile, ...)  begin a break on the given tile
-#   - cancel()                       called on MOUSEBUTTONUP
+#   - cancel()                       called when the click-walk path is preempted
 
 import random
 
@@ -24,7 +23,7 @@ from config import TILE_LENGTH
 from effects import BreakState, Particle, spawn_break_chunks
 from item import roll_drops
 from prototype import load_prototype
-from world import world_to_tile, tile_center
+from world import tile_center
 
 
 class BreakSystem:
@@ -35,14 +34,6 @@ class BreakSystem:
 
         self.breaking: BreakState | None = None
         self.particles: list[Particle] = []
-        # last polled cursor screen pos. used to detect actual mouse motion
-        # versus camera-driven world-position drift, so we only drag-retarget
-        # when the user genuinely moves the mouse.
-        self._last_cursor_pos: tuple[int, int] | None = None
-        # drag-mining mode: while True, the per-frame poll auto-starts a new
-        # break whenever the current one finishes and the cursor is over
-        # another breakable tile. set on start_break, cleared on cancel().
-        self._drag_mining: bool = False
 
     # --- public api ---
 
@@ -85,16 +76,11 @@ class BreakSystem:
             tile=tile,
             entity_id=entity_id,
         )
-        self._last_cursor_pos = pg.mouse.get_pos()
-        self._drag_mining = True
 
     def cancel(self) -> None:
         self.breaking = None
-        self._drag_mining = False
-        self._last_cursor_pos = None
 
     def tick(self, dt: float) -> None:
-        self._tick_drag_start()
         self._tick_active_break()
         self._tick_particles(dt)
 
@@ -195,32 +181,9 @@ class BreakSystem:
             self.world.spawn_dropped_item(item_id, qty, world_pos)
         self.particles.extend(spawn_break_chunks(world_pos, pg.time.get_ticks()))
 
-    def _tick_drag_start(self) -> None:
-        # while drag-mining is on and the button is held, keep starting new
-        # breaks on whatever's under the cursor. covers the gap between one
-        # break finishing and the next being clicked, so a sweep through an
-        # ore patch doesn't stall after the first tile breaks.
-        if not self._drag_mining:
-            return
-        if not pg.mouse.get_pressed()[0]:
-            self._drag_mining = False
-            self._last_cursor_pos = None
-            return
-        if self.breaking is not None:
-            return
-        cursor = pg.mouse.get_pos()
-        wx, wy = self.camera.screen_to_world(cursor)
-        tile = world_to_tile((wx, wy))
-        target = self.try_acquire_target(tile)
-        if target is None:
-            return
-        proto, entity_id = target
-        self.start_break(proto, tile, entity_id=entity_id)
-
     def _tick_active_break(self) -> None:
         bk = self.breaking
         if bk is None:
-            self._last_cursor_pos = None
             return
         # target liveness
         if bk.entity_id is not None:
@@ -234,23 +197,6 @@ class BreakSystem:
         if not self.world.tile_in_reach(*bk.tile):
             self.breaking = None
             return
-
-        # drag-retarget on actual cursor motion (screen pos change). polling
-        # avoids depending on MOUSEMOTION events being delivered, and the
-        # screen-pos check filters out camera-driven world drift.
-        cursor = pg.mouse.get_pos()
-        if self._last_cursor_pos is not None and cursor != self._last_cursor_pos:
-            wx, wy = self.camera.screen_to_world(cursor)
-            cur_tile = world_to_tile((wx, wy))
-            if cur_tile != bk.tile:
-                target = self.try_acquire_target(cur_tile)
-                if target is not None:
-                    proto, entity_id = target
-                    self.start_break(proto, cur_tile, entity_id=entity_id)
-                    self._last_cursor_pos = cursor
-                    return
-        self._last_cursor_pos = cursor
-
         now_ms = pg.time.get_ticks()
         if bk.is_complete(now_ms):
             center = tile_center(bk.tile)

@@ -14,7 +14,7 @@ import random
 
 import pygame as pg
 
-from config import ITEMS_DIR, ITEM_ICON_SIZE
+from config import ITEMS_DIR, ITEM_ICON_SIZE, RECIPES_DIR
 from resources import load_image
 
 
@@ -23,7 +23,6 @@ class ItemPrototype:
     id: str
     name: str
     image_path: str
-    stack_limit: int
     # optional per-item icon size override. when None, uses ITEM_ICON_SIZE.
     # lets a single bulky-looking item (e.g. coal) sit slightly larger than
     # finer ones (coin, copper) without changing the default for everything.
@@ -62,7 +61,6 @@ def load_item(item_id: str) -> ItemPrototype:
         id=raw['id'],
         name=raw['name'],
         image_path=raw['image'],
-        stack_limit=raw.get('stack_limit', 64),
         icon_size=raw.get('icon_size'),
     )
     _cache[item_id] = proto
@@ -92,6 +90,34 @@ def roll_drops(drops_spec) -> list[tuple[str, int]]:
             qty = random.randint(qty[0], qty[1])
         out.append((d['item'], qty))
     return out
+
+
+@dataclass(frozen=True)
+class Recipe:
+    # frozen because recipes are looked up by id; the inputs/outputs lists
+    # are stored as tuples of (item_id, quantity) for hashability + immutability.
+    id: str
+    inputs: tuple[tuple[str, int], ...]
+    outputs: tuple[tuple[str, int], ...]
+    duration_ms: int
+
+
+_recipe_cache: dict[str, Recipe] = {}
+
+
+def load_recipe(recipe_id: str) -> Recipe:
+    if recipe_id in _recipe_cache:
+        return _recipe_cache[recipe_id]
+    with open(f'{RECIPES_DIR}/{recipe_id}.json') as f:
+        raw = json.load(f)
+    rec = Recipe(
+        id=raw['id'],
+        inputs=tuple((d['item'], d['quantity']) for d in raw['inputs']),
+        outputs=tuple((d['item'], d['quantity']) for d in raw['outputs']),
+        duration_ms=int(raw['duration'] * 1000),
+    )
+    _recipe_cache[recipe_id] = rec
+    return rec
 
 
 def format_quantity(n: int) -> str:

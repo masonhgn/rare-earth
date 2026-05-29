@@ -13,14 +13,6 @@ import math
 
 import pygame as pg
 
-
-def _build_tile_tint(size: int, color: tuple[int, int, int, int]) -> pg.Surface:
-    # flat semi-transparent square. low alpha gives a soft shadow look
-    # without an outline or gradient.
-    surf = pg.Surface((size, size), pg.SRCALPHA)
-    surf.fill(color)
-    return surf
-
 from config import TILE_LENGTH, TITLE, DROPPED_ITEM_SIZE
 from world import World, world_to_tile
 from render import Screen, LAYERS, Minimap
@@ -29,7 +21,12 @@ from hud import Hud
 from item import load_item, format_quantity, get_item_icon
 from settings import load_settings, save_settings
 from breaking import BreakSystem
+from factory import FactorySystem, FactoryPanel
 import input_handler
+
+
+# how long the yellow click marker stays visible (fades to 0 over this span)
+CLICK_MARKER_MS = 500
 
 
 class Game:
@@ -52,23 +49,32 @@ class Game:
         self.hud.visible = self.settings.get('show_hud', True)
         # break state, drag-mining mode, particle effects all live here.
         self.break_system = BreakSystem(self.world, self.screen.camera, self.minimap)
+        # factory system + modal panel ui for machine entities.
+        self.factory_system = FactorySystem(self.world)
+        self.factory_panel = FactoryPanel()
 
         # ui state
         self.held_item: dict | None = None
         self.hover_pos: tuple[int, int] = (0, 0)
-        # selected_tile is the world tile coord under the cursor each frame,
-        # used to draw a highlight overlay.
-        self.selected_tile: tuple[int, int] | None = None
+
+        # click marker: yellow X drawn at the click world pos, fading over
+        # CLICK_MARKER_MS. None when no recent click.
+        self.click_marker: tuple[tuple[float, float], int] | None = None
+
+        # pending break target: set when the player click-walked toward a
+        # breakable. populated as (entity_id_or_None, tile, world_pos_center).
+        # cleared on WASD preempt or successful break.
+        self.pending_break: tuple | None = None
+        # pending factory-open target: set when the player click-walked toward
+        # a machine entity. fires open_for() the moment any footprint tile is
+        # in reach. cleared on WASD preempt.
+        self.pending_open = None
 
         # frame loop state
         self.clock = pg.time.Clock()
         self.dt = 0.0
         self.running = False
 
-        # pre-compute the hover-highlight tints (one per reach state).
-        # flat low-alpha square reads as a soft shadow on the tile.
-        self._highlight_reach = _build_tile_tint(TILE_LENGTH, (0, 0, 0, 35))
-        self._highlight_unreach = _build_tile_tint(TILE_LENGTH, (170, 60, 60, 50))
 
         self._seed_world()
         self._position_inventory()
@@ -90,6 +96,25 @@ class Game:
         self.world.spawn_dropped_item('coin', 7, (8 * TILE_LENGTH, 6 * TILE_LENGTH))
         self.world.spawn_dropped_item('copper', 42, (4 * TILE_LENGTH, 6 * TILE_LENGTH))
 
+    def close_factory_panel(self) -> None:
+        # closes the panel AND deposits any cursor-held item back into the
+        # player inventory. without this, walking away from the factory while
+        # holding an item leaves it stuck in held_item — subsequent world
+        # clicks then drop the invisible item and never reach the walk logic.
+        if self.held_item is not None:
+            leftover = self.inventory.add_item(
+                self.held_item['item_id'], self.held_item['quantity'],
+            )
+            if leftover > 0:
+                # inventory full — fall back to dropping at the player's feet
+                player = self.world.get_player()
+                sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+                cx = player.world_x + sw / 2
+                cy = player.world_y + sh / 2
+                self.world.spawn_dropped_item(self.held_item['item_id'], leftover, (cx, cy))
+            self.held_item = None
+        self.factory_panel.close()
+
     def _player_collides_with_solid(self) -> bool:
         # is the player's hitbox overlapping any solid entity's footprint?
         # cheap n² scan over self.world.entities — fine until we have many
@@ -99,6 +124,68 @@ class Game:
             if entity.prototype.solid and hb.colliderect(entity.collision_rect()):
                 return True
         return False
+
+    def _follow_path(self, player) -> tuple[float, float]:
+        # walk along the path at the player's speed. consumes as much of
+        # this frame's step as possible — if the player arrives at a
+        # waypoint with leftover step, the loop continues to the next
+        # waypoint in the same frame (so animation never sees a 0-vector
+        # mid-walk just because a waypoint flipped). returns the total
+        # (dx, dy) actually applied, used by _update_player_animation.
+        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        speed = player.prototype.speed or 0.0
+        step_remaining = speed * self.dt
+        total_dx = total_dy = 0.0
+        while player.path and step_remaining > 0:
+            wp_tx, wp_ty = player.path[0]
+            target_x = wp_tx * TILE_LENGTH + TILE_LENGTH / 2
+            target_y = wp_ty * TILE_LENGTH + TILE_LENGTH / 2
+            center_x = player.world_x + sprite_w / 2
+            center_y = player.world_y + sprite_h / 2
+            dx = target_x - center_x
+            dy = target_y - center_y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < 4:
+                player.path.pop(0)
+                continue
+            if step_remaining >= dist:
+                # cover the rest of the leg this frame; pop and keep going.
+                player.world_x += dx
+                player.world_y += dy
+                total_dx += dx
+                total_dy += dy
+                step_remaining -= dist
+                player.path.pop(0)
+            else:
+                # partial step toward the waypoint.
+                nx = dx / dist
+                ny = dy / dist
+                player.world_x += nx * step_remaining
+                player.world_y += ny * step_remaining
+                total_dx += nx * step_remaining
+                total_dy += ny * step_remaining
+                step_remaining = 0
+        return total_dx, total_dy
+
+    def _update_player_animation(self, player, dx: float, dy: float) -> None:
+        # single canonical animation update, run after movement is resolved.
+        # only sets idle when nothing actually moved this frame. preserves
+        # the existing horizontal facing during pure-vertical movement, so
+        # north/south path segments don't flicker the sprite to front-facing.
+        if player.anim is None:
+            return
+        if dx == 0 and dy == 0:
+            player.anim.set_state('idle')
+            return
+        # threshold avoids flipping facing for tiny rounding-noise dx values
+        if dx > 0.5:
+            player.anim.set_state('walking_right')
+        elif dx < -0.5:
+            player.anim.set_state('walking_left')
+        elif player.anim.current_state not in ('walking_left', 'walking_right'):
+            # we ARE moving (pure vertical) but were idle — pick a default
+            # facing so the sprite doesn't stay front-facing mid-walk.
+            player.anim.set_state('walking_right')
 
     def _clamp_player_to_bounds(self) -> None:
         # keep the player's *hitbox* inside the map rectangle. clamping the
@@ -167,18 +254,69 @@ class Game:
     def _update(self) -> None:
         player = self.world.get_player()
         dx, dy = input_handler.poll_movement(player, self.dt)
+        moved_dx = moved_dy = 0.0
         if dx or dy:
+            # manual WASD movement preempts any active path.
+            player.path = []
+            self.pending_break = None
+            self.pending_open = None
             # apply each axis separately so the player slides along solid
             # walls instead of sticking. each axis reverts on collision.
             if dx:
                 player.world_x += dx
                 if self._player_collides_with_solid():
                     player.world_x -= dx
+                else:
+                    moved_dx = dx
             if dy:
                 player.world_y += dy
                 if self._player_collides_with_solid():
                     player.world_y -= dy
+                else:
+                    moved_dy = dy
             self._clamp_player_to_bounds()
+        elif player.path:
+            moved_dx, moved_dy = self._follow_path(player)
+
+        # one canonical place to update the player's facing/animation state,
+        # using the *actual* movement vector applied this frame.
+        self._update_player_animation(player, moved_dx, moved_dy)
+
+        # if a click-walk pointed at a breakable, auto-fire the break the
+        # moment the player is within reach. clears path + pending so the
+        # player stops walking.
+        if self.pending_break is not None:
+            proto, entity_id, tile = self.pending_break
+            if self.world.tile_in_reach(*tile):
+                # also make sure the breakable still exists (might have been
+                # broken by drag-mining mid-walk, etc).
+                still_there = (
+                    entity_id is None and self.world.overlay_at(*tile) is not None
+                ) or (
+                    entity_id is not None and entity_id in self.world.entities
+                )
+                if still_there:
+                    self.break_system.start_break(proto, tile, entity_id=entity_id)
+                player.path = []
+                self.pending_break = None
+
+        # click-to-open-factory: same pattern as pending_break. fire as soon
+        # as the player is adjacent to any footprint tile of the target machine.
+        if self.pending_open is not None:
+            machine = self.pending_open
+            if any(self.world.tile_in_reach(tx, ty, max_dist=1) for tx, ty in machine.footprint()):
+                self.factory_panel.open_for(machine, (self.screen.width, self.screen.height))
+                self.inventory.open = True
+                player.path = []
+                self.pending_open = None
+
+        # auto-close: if the panel is open and the player has wandered out
+        # of adjacency (manual WASD or path mid-walk), close it and return
+        # any held item to inventory so the player isn't stuck holding it.
+        if self.factory_panel.open and self.factory_panel.entity is not None:
+            machine = self.factory_panel.entity
+            if not any(self.world.tile_in_reach(tx, ty, max_dist=1) for tx, ty in machine.footprint()):
+                self.close_factory_panel()
 
         # camera follows the player, accounting for sprite size so the player
         # appears centered (not anchored at top-left).
@@ -193,12 +331,10 @@ class Game:
                 # inventory full: spit the leftover back onto the ground
                 self.world.spawn_dropped_item(drop.item_id, leftover, drop.world_pos)
 
-        # selection highlight tracks the tile under the cursor (in reach or not)
-        wx, wy = self.screen.camera.screen_to_world(self.hover_pos)
-        self.selected_tile = world_to_tile((wx, wy))
-
         # break/drag-mining state machine + particle physics
         self.break_system.tick(self.dt)
+        # advance any in-progress machine recipes
+        self.factory_system.tick()
 
     # --- render ---
 
@@ -211,7 +347,7 @@ class Game:
         self._queue_overlay(cam, culling)
         self._queue_entities(cam, culling)
         self._queue_dropped(cam, culling)
-        self._queue_highlight(cam)
+        self._queue_click_marker(cam)
         self.break_system.queue_progress_bar(self.screen.renderer, cam)
         self.break_system.queue_particles(self.screen.renderer, cam, culling)
 
@@ -221,6 +357,8 @@ class Game:
         self._draw_hud()
         self._draw_minimap()
         self.inventory.render(self.screen.surface)
+        self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
+        self._draw_hover_tooltip()
         self._draw_held_item()
 
     def _queue_terrain(self, cam, culling) -> None:
@@ -348,25 +486,27 @@ class Game:
             sx, sy = cam.world_to_screen(drop.world_pos)
             self.screen.renderer.queue('dropped', img, (sx, sy + offset_y))
 
-    def _queue_highlight(self, cam) -> None:
-        if self.selected_tile is None:
+    def _queue_click_marker(self, cam) -> None:
+        # yellow X at the click point, fading over CLICK_MARKER_MS.
+        if self.click_marker is None:
             return
-        # don't show the world-tile highlight when the cursor is over the
-        # open inventory panel — the user is interacting with ui, not world.
-        if self.inventory.open and self.inventory.rect.collidepoint(self.hover_pos):
+        (wx, wy), born_ms = self.click_marker
+        now_ms = pg.time.get_ticks()
+        age = now_ms - born_ms
+        if age >= CLICK_MARKER_MS:
+            self.click_marker = None
             return
-        tx, ty = self.selected_tile
-        if not self.world.in_bounds_tile(tx, ty):
-            return
-        sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
-        # soft radial shadow centered on the tile. no outline — the falloff
-        # itself draws the eye to the hovered cell. reach validity swaps the
-        # pre-built color variant.
-        in_reach = self.world.tile_in_reach(tx, ty)
-        overlay = self._highlight_reach if in_reach else self._highlight_unreach
-        self.screen.renderer.queue('highlight', overlay, (sx, sy))
+        alpha = int(255 * (1 - age / CLICK_MARKER_MS))
+        sx, sy = cam.world_to_screen((wx, wy))
+        size = 12
+        # draw on a small SRCALPHA surface so we can apply alpha
+        surf = pg.Surface((size * 2 + 4, size * 2 + 4), pg.SRCALPHA)
+        color = (255, 220, 80, alpha)
+        pg.draw.line(surf, color, (2, 2), (size * 2 + 2, size * 2 + 2), 3)
+        pg.draw.line(surf, color, (size * 2 + 2, 2), (2, size * 2 + 2), 3)
+        self.screen.renderer.queue('highlight', surf, (sx - size - 2, sy - size - 2))
 
-    # --- hud / held item drawn directly on display (screen-space) ---
+# --- hud / held item drawn directly on display (screen-space) ---
 
     def _draw_hud(self) -> None:
         # clock.get_fps() is smoothed over the last 10 frames
@@ -390,6 +530,53 @@ class Game:
             self.screen.camera.offset,
             center,
         )
+
+    def _hovered_item_proto(self):
+        # find the item under the cursor across inventory, factory panel, and
+        # world drops (in priority order). returns ItemPrototype or None.
+        # held items don't get a tooltip — the cursor already shows the icon.
+        if self.held_item is not None:
+            return None
+        mx, my = self.hover_pos
+
+        # 1. factory panel slot
+        if self.factory_panel.open and self.factory_panel.entity is not None:
+            info = self.factory_panel.slot_at_pixel((mx, my))
+            if info is not None:
+                kind, idx = info
+                ms = self.factory_panel.entity.machine_state
+                slots = ms['input_slots'] if kind == 'input' else ms['output_slots']
+                if slots[idx] is not None:
+                    return load_item(slots[idx]['item_id'])
+
+        # 2. inventory slot
+        if self.inventory.open:
+            slot_idx = self.inventory.slot_at_pixel((mx, my))
+            if slot_idx is not None and self.inventory.slots[slot_idx] is not None:
+                return load_item(self.inventory.slots[slot_idx]['item_id'])
+
+        # 3. world drop under cursor
+        wx, wy = self.screen.camera.screen_to_world((mx, my))
+        for drop in self.world.dropped:
+            if (drop.world_x <= wx < drop.world_x + DROPPED_ITEM_SIZE
+                    and drop.world_y <= wy < drop.world_y + DROPPED_ITEM_SIZE):
+                return load_item(drop.item_id)
+        return None
+
+    def _draw_hover_tooltip(self) -> None:
+        proto = self._hovered_item_proto()
+        if proto is None:
+            return
+        label = self.hud.font.render(proto.name, True, (245, 235, 200))
+        # bottom-right corner with a subtle dark padded background
+        margin = 14
+        pad_x, pad_y = 10, 5
+        rect = label.get_rect()
+        rect.bottomright = (self.screen.width - margin, self.screen.height - margin)
+        bg = pg.Surface((rect.w + pad_x * 2, rect.h + pad_y * 2), pg.SRCALPHA)
+        bg.fill((0, 0, 0, 180))
+        self.screen.surface.blit(bg, (rect.x - pad_x, rect.y - pad_y))
+        self.screen.surface.blit(label, rect)
 
     def _draw_held_item(self) -> None:
         if self.held_item is None:

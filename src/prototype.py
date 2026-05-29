@@ -68,6 +68,11 @@ class EntityPrototype:
     # via per-axis revert in Game._update.
     solid: bool = False
 
+    # optional machine spec: {"input_slots": int, "output_slots": int,
+    # "recipes": [recipe_id, ...]}. when set, Entity initializes a
+    # machine_state dict and FactorySystem ticks the entity each frame.
+    machine: Optional[dict] = None
+
 
 _cache: dict[str, EntityPrototype] = {}
 

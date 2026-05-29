@@ -1,6 +1,5 @@
 {
     "id": "coin",
     "name": "Coin",
-    "image": "src/data/sprites/items/coin.png",
-    "stack_limit": 999999
+    "image": "src/data/sprites/items/coin.png"
 }

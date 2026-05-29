@@ -1,6 +1,5 @@
 {
     "id": "coal",
     "name": "Coal",
-    "image": "src/data/sprites/items/coal.png",
-    "stack_limit": 100
+    "image": "src/data/sprites/items/coal.png"
 }

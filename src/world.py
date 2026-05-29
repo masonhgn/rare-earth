@@ -96,6 +96,41 @@ class World:
     def in_bounds_tile(self, tx: int, ty: int) -> bool:
         return 0 <= tx < self.width and 0 <= ty < self.height
 
+    def is_walkable(self, tx: int, ty: int) -> bool:
+        # in-bounds AND not blocked by a solid entity. all overlay tiles are
+        # walkable — only entities with prototype.solid=True block movement.
+        if not self.in_bounds_tile(tx, ty):
+            return False
+        eid = self.tile_index.get((tx, ty))
+        if eid is None:
+            return True
+        entity = self.entities.get(eid)
+        return entity is None or not entity.prototype.solid
+
+    def nearest_walkable(self, tx: int, ty: int, max_radius: int = 12) -> tuple[int, int] | None:
+        # ring-search outward for the closest walkable tile. used when the
+        # click hits a solid (e.g. somewhere on the factory) — we route the
+        # player to an adjacent walkable cell instead.
+        if self.is_walkable(tx, ty):
+            return (tx, ty)
+        for r in range(1, max_radius + 1):
+            best = None
+            best_dist_sq = None
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    if max(abs(dx), abs(dy)) != r:
+                        continue  # only the ring
+                    candidate = (tx + dx, ty + dy)
+                    if not self.is_walkable(*candidate):
+                        continue
+                    dsq = dx * dx + dy * dy
+                    if best is None or dsq < best_dist_sq:
+                        best = candidate
+                        best_dist_sq = dsq
+            if best is not None:
+                return best
+        return None
+
     def overlay_at(self, tx: int, ty: int) -> str | None:
         # return the overlay sprite_id at the given tile, or None if the tile
         # is empty or out of bounds. bundles the bounds check that three
@@ -104,18 +139,19 @@ class World:
             return None
         return self.overlay_grid[ty][tx]
 
-    def tile_in_reach(self, tx: int, ty: int) -> bool:
+    def tile_in_reach(self, tx: int, ty: int, max_dist: int = PLAYER_REACH_TILES) -> bool:
         # measure reach from the player's *visual center*, not the sprite
         # top-left. for a 128x128 player sprite at world_x=200, the body is
         # centered around (264, 264) ≈ tile (4, 4), not (3, 3) as the raw
-        # world_x would suggest.
+        # world_x would suggest. callers can tighten via max_dist (e.g. 1
+        # for factory interaction, which only works when adjacent).
         player = self.get_player()
         sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
         cx = player.world_x + sprite_w / 2
         cy = player.world_y + sprite_h / 2
         ptx = int(cx // TILE_LENGTH)
         pty = int(cy // TILE_LENGTH)
-        return abs(tx - ptx) <= PLAYER_REACH_TILES and abs(ty - pty) <= PLAYER_REACH_TILES
+        return abs(tx - ptx) <= max_dist and abs(ty - pty) <= max_dist
 
     # --- entities ---
 

@@ -3,6 +3,7 @@
 DATA_DIR = 'src/data'
 ENTITIES_DIR = f'{DATA_DIR}/entities'
 ITEMS_DIR = f'{DATA_DIR}/items'
+RECIPES_DIR = f'{DATA_DIR}/recipes'
 
 # sprite registry. references both an atlas (tile sheet sliced by row/col)
 # and any standalone png files. atlas image path lives inside the json
