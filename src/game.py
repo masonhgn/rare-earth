@@ -13,6 +13,14 @@ import math
 
 import pygame as pg
 
+
+def _build_tile_tint(size: int, color: tuple[int, int, int, int]) -> pg.Surface:
+    # flat semi-transparent square. low alpha gives a soft shadow look
+    # without an outline or gradient.
+    surf = pg.Surface((size, size), pg.SRCALPHA)
+    surf.fill(color)
+    return surf
+
 from config import TILE_LENGTH, TITLE, DROPPED_ITEM_SIZE
 from world import World, world_to_tile
 from render import Screen, LAYERS, Minimap
@@ -57,6 +65,11 @@ class Game:
         self.dt = 0.0
         self.running = False
 
+        # pre-compute the hover-highlight tints (one per reach state).
+        # flat low-alpha square reads as a soft shadow on the tile.
+        self._highlight_reach = _build_tile_tint(TILE_LENGTH, (0, 0, 0, 35))
+        self._highlight_unreach = _build_tile_tint(TILE_LENGTH, (170, 60, 60, 50))
+
         self._seed_world()
         self._position_inventory()
 
@@ -65,8 +78,42 @@ class Game:
     def _seed_world(self) -> None:
         # ore patches live in world.overlay_grid (placed by generate_world_map).
         # a couple of dropped items so pickup is visible right away.
+        # factory: 12x8 tile footprint, sprite matches (no overflow). anchored
+        # at tile (10, 6) — well inland from every edge, visible to the east
+        # of the player spawn (tile 6,6).
+        from entity import Entity
+        from prototype import load_prototype
+        try:
+            self.world.add_entity(Entity(load_prototype('factory'), (10 * TILE_LENGTH, 6 * TILE_LENGTH)))
+        except ValueError:
+            pass
         self.world.spawn_dropped_item('coin', 7, (8 * TILE_LENGTH, 6 * TILE_LENGTH))
         self.world.spawn_dropped_item('copper', 42, (4 * TILE_LENGTH, 6 * TILE_LENGTH))
+
+    def _player_collides_with_solid(self) -> bool:
+        # is the player's hitbox overlapping any solid entity's footprint?
+        # cheap n² scan over self.world.entities — fine until we have many
+        # solids on screen; switch to a spatial index then.
+        hb = self.world.get_player().hitbox_rect()
+        for entity in self.world.entities.values():
+            if entity.prototype.solid and hb.colliderect(entity.collision_rect()):
+                return True
+        return False
+
+    def _clamp_player_to_bounds(self) -> None:
+        # keep the player's *hitbox* inside the map rectangle. clamping the
+        # full 128x128 sprite frame would stop the player ~40px before the
+        # visible body actually reaches the edge, since most of the frame is
+        # transparent padding. hitbox math matches Entity.hitbox_rect().
+        player = self.world.get_player()
+        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        hitbox_w, hitbox_h = player.prototype.hitbox or (sprite_w, sprite_h)
+        hx_off = (sprite_w - hitbox_w) / 2
+        hy_off = sprite_h - hitbox_h
+        map_w = self.world.width * TILE_LENGTH
+        map_h = self.world.height * TILE_LENGTH
+        player.world_x = max(-hx_off, min(player.world_x, map_w - hx_off - hitbox_w))
+        player.world_y = max(-hy_off, min(player.world_y, map_h - hy_off - hitbox_h))
 
     def _position_inventory(self) -> None:
         # bottom-left corner with a small margin. (top-left would collide
@@ -121,7 +168,17 @@ class Game:
         player = self.world.get_player()
         dx, dy = input_handler.poll_movement(player, self.dt)
         if dx or dy:
-            player.move_continuous(dx, dy)
+            # apply each axis separately so the player slides along solid
+            # walls instead of sticking. each axis reverts on collision.
+            if dx:
+                player.world_x += dx
+                if self._player_collides_with_solid():
+                    player.world_x -= dx
+            if dy:
+                player.world_y += dy
+                if self._player_collides_with_solid():
+                    player.world_y -= dy
+            self._clamp_player_to_bounds()
 
         # camera follows the player, accounting for sprite size so the player
         # appears centered (not anchored at top-left).
@@ -302,13 +359,11 @@ class Game:
         if not self.world.in_bounds_tile(tx, ty):
             return
         sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
-        overlay = pg.Surface((TILE_LENGTH, TILE_LENGTH), pg.SRCALPHA)
-        # bright outline + soft inner glow. color varies subtly with reach validity.
+        # soft radial shadow centered on the tile. no outline — the falloff
+        # itself draws the eye to the hovered cell. reach validity swaps the
+        # pre-built color variant.
         in_reach = self.world.tile_in_reach(tx, ty)
-        edge_color = (255, 240, 130, 220) if in_reach else (220, 80, 80, 200)
-        glow_color = (255, 240, 130, 35) if in_reach else (220, 80, 80, 35)
-        overlay.fill(glow_color)
-        pg.draw.rect(overlay, edge_color, overlay.get_rect(), width=2)
+        overlay = self._highlight_reach if in_reach else self._highlight_unreach
         self.screen.renderer.queue('highlight', overlay, (sx, sy))
 
     # --- hud / held item drawn directly on display (screen-space) ---

@@ -27,7 +27,7 @@ TITLE = 'rare-earth'
 TILE_LENGTH = 64
 
 # player
-PLAYER_SPAWN = (200, 200)
+PLAYER_SPAWN = (400, 400)
 PLAYER_REACH_TILES = 4
 
 # world drops

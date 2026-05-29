@@ -40,12 +40,25 @@ class Entity:
         # doing // first then int() gives the correct floor.
         return (int(self.world_x // TILE_LENGTH), int(self.world_y // TILE_LENGTH))
 
+    def _footprint_dims(self) -> tuple[int, int]:
+        # (cols, rows) of tiles this entity occupies. honors footprint_size
+        # if set so a single-cell grid with a 128x128 sprite can claim a
+        # 2x2 footprint without splitting the image into 4 sub-sprites.
+        if self.prototype.footprint_size is not None:
+            return self.prototype.footprint_size
+        return (len(self.prototype.grid[0]), len(self.prototype.grid))
+
     def footprint(self) -> list[tuple[int, int]]:
-        # tile coords occupied by this entity, derived from prototype.grid shape.
         base_tx, base_ty = self.tile_coord()
-        rows = len(self.prototype.grid)
-        cols = len(self.prototype.grid[0])
+        cols, rows = self._footprint_dims()
         return [(base_tx + c, base_ty + r) for r in range(rows) for c in range(cols)]
+
+    def collision_rect(self) -> pg.Rect:
+        # tile-aligned world rect used for solid-collision tests. covers
+        # the entity's full footprint, not the rendered sprite size.
+        cols, rows = self._footprint_dims()
+        return pg.Rect(int(self.world_x), int(self.world_y),
+                       cols * TILE_LENGTH, rows * TILE_LENGTH)
 
     def hitbox_rect(self) -> pg.Rect:
         # rect covering the visible body of the entity. used for pickup /

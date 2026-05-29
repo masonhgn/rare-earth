@@ -59,6 +59,15 @@ class EntityPrototype:
     # so the trunk sits in the anchored tile instead of overflowing right/down).
     render_offset: Optional[tuple[int, int]] = None
 
+    # optional (cols, rows) tile footprint, decoupled from the grid. lets a
+    # single-sprite entity (grid 1x1 with a 128x128 image) claim multiple
+    # tiles in the tile_index. when absent, footprint matches grid dims.
+    footprint_size: Optional[tuple[int, int]] = None
+
+    # whether the player collides with this entity. solids block movement
+    # via per-axis revert in Game._update.
+    solid: bool = False
+
 
 _cache: dict[str, EntityPrototype] = {}
 
@@ -81,5 +90,7 @@ def load_prototype(name: str) -> EntityPrototype:
         raw['hitbox'] = tuple(raw['hitbox'])
     if 'render_offset' in raw and raw['render_offset'] is not None:
         raw['render_offset'] = tuple(raw['render_offset'])
+    if 'footprint_size' in raw and raw['footprint_size'] is not None:
+        raw['footprint_size'] = tuple(raw['footprint_size'])
     _cache[name] = EntityPrototype(**raw)
     return _cache[name]

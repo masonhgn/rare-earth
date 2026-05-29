@@ -1,0 +1,8 @@
+{
+    "grid": [["factory"]],
+    "tile_locked": true,
+    "editable": false,
+    "solid": true,
+    "footprint_size": [12, 8],
+    "sprite_size": [768, 512]
+}

@@ -23,6 +23,10 @@
         "coal_ore": {
             "file": "src/data/sprites/tiles/coal_ore.png",
             "size": [64, 64]
+        },
+        "factory": {
+            "file": "src/data/sprites/tiles/factory.png",
+            "size": [768, 512]
         }
     }
 }

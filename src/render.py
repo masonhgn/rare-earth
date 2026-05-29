@@ -140,7 +140,7 @@ class Screen:
         self.culling.update_screen_size(self.width, self.height)
         self.renderer.set_surface(self.surface)
 
-    def clear(self, color=(20, 20, 28)) -> None:
+    def clear(self, color=(170, 210, 240)) -> None:
         self.surface.fill(color)
 
 
