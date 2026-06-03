@@ -115,13 +115,33 @@ class Renderer:
         self._batches.clear()
 
 
+def _desktop_size(*, default: tuple[int, int]) -> tuple[int, int]:
+    # current desktop resolution of the primary monitor. used for
+    # borderless mode to size the surface to the full screen. several
+    # pygame builds expose this differently, so we try the canonical
+    # call and fall back if it isn't available.
+    try:
+        sizes = pg.display.get_desktop_sizes()
+        if sizes:
+            return sizes[0]
+    except (AttributeError, pg.error):
+        pass
+    info = pg.display.Info()
+    if info.current_w > 0 and info.current_h > 0:
+        return (info.current_w, info.current_h)
+    return default
+
+
 class Screen:
     # display + sprite atlas + animation library + camera + culling + renderer.
     # the single facade the game uses to draw anything.
-    def __init__(self, width: int, height: int, fullscreen: bool = False):
-        flags = pg.FULLSCREEN if fullscreen else 0
-        self.surface = pg.display.set_mode((width, height), flags)
-        self.width, self.height = self.surface.get_size()
+    #
+    # display_mode controls window flavor:
+    #   'windowed'   -> standard window at the requested size
+    #   'fullscreen' -> exclusive fullscreen at the requested size
+    #   'borderless' -> NOFRAME at the desktop's current resolution
+    def __init__(self, width: int, height: int, display_mode: str = 'windowed'):
+        self._open_surface(width, height, display_mode)
 
         self.sprites = load_sprites(SPRITES_FILE)
 
@@ -132,13 +152,24 @@ class Screen:
         self.culling = ViewFrustum(self.width, self.height)
         self.renderer = Renderer(self.surface)
 
-    def resize(self, width: int, height: int, fullscreen: bool = False) -> None:
-        flags = pg.FULLSCREEN if fullscreen else 0
-        self.surface = pg.display.set_mode((width, height), flags)
-        self.width, self.height = self.surface.get_size()
+    def resize(self, width: int, height: int, display_mode: str = 'windowed') -> None:
+        self._open_surface(width, height, display_mode)
         self.camera.update_screen_size(self.width, self.height)
         self.culling.update_screen_size(self.width, self.height)
         self.renderer.set_surface(self.surface)
+
+    def _open_surface(self, width: int, height: int, display_mode: str) -> None:
+        if display_mode == 'fullscreen':
+            self.surface = pg.display.set_mode((width, height), pg.FULLSCREEN)
+        elif display_mode == 'borderless':
+            # borderless = NOFRAME at the desktop's native size, so the
+            # window covers the screen without alt-tabbing pain. fall
+            # back to the requested size if the desktop probe fails.
+            dw, dh = _desktop_size(default=(width, height))
+            self.surface = pg.display.set_mode((dw, dh), pg.NOFRAME)
+        else:
+            self.surface = pg.display.set_mode((width, height), 0)
+        self.width, self.height = self.surface.get_size()
 
     def clear(self, color=(170, 210, 240)) -> None:
         self.surface.fill(color)

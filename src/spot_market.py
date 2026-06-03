@@ -1,0 +1,122 @@
+
+# spot market: per-item global price that walks every 5s with
+# mean-reverting drift.
+#
+# items are tradeable iff their json has a `spot_price` field. that field
+# doubles as both the initial price AND the mean-reversion target the
+# random walk drifts toward. items without it are not listed on spot and
+# can't be sold or bought there.
+#
+# each tick picks a step from {-2,-1,0,+1,+2}. when at target, picks are
+# uniform. when off-target, weights tilt toward target-closing steps so
+# prices come home on their own — that's the "soft ceiling" answer in
+# the design phase: there's no hard cap, but a wandering price gets
+# pulled back over time.
+#
+# hard floor at 0. no ceiling — mean reversion handles it.
+
+import os
+import random
+
+from config import ITEMS_DIR
+from item import load_item
+import slots as slot_ops
+
+
+# how often the walk takes a step. real seconds, decoupled from the
+# day clock so price action is visible while a player just stands there.
+SPOT_TICK_SEC = 5.0
+
+# step magnitudes the walk picks from each tick.
+STEP_CHOICES = (-2, -1, 0, 1, 2)
+
+
+def _drift_weights(diff: int) -> list[float]:
+    # diff > 0  -> current is below target, bias positive steps
+    # diff < 0  -> current is above target, bias negative steps
+    # diff == 0 -> uniform
+    # pressure capped so a wildly off price doesn't always pick +2/-2
+    pressure = min(2.0, abs(diff) * 0.3)
+    weights: list[float] = []
+    for s in STEP_CHOICES:
+        w = 1.0
+        if (diff > 0 and s > 0) or (diff < 0 and s < 0):
+            w += pressure * abs(s)
+        weights.append(w)
+    return weights
+
+
+def _discover_tradeable() -> dict[str, int]:
+    # scan items/*.json once and gather {item_id: target_price} from any
+    # item that declares a spot_price field.
+    targets: dict[str, int] = {}
+    for fn in os.listdir(ITEMS_DIR):
+        if not fn.endswith('.json'):
+            continue
+        item_id = fn[:-5]
+        proto = load_item(item_id)
+        if proto.spot_price is not None:
+            targets[item_id] = proto.spot_price
+    return targets
+
+
+class SpotMarket:
+    def __init__(self) -> None:
+        self.targets = _discover_tradeable()
+        # starting price = target for every tradeable item.
+        self.prices: dict[str, int] = dict(self.targets)
+        # seconds accumulated since the last walk step.
+        self._tick_clock = 0.0
+
+    def tick(self, dt: float) -> None:
+        # while-loop instead of single-fire so a large dt (e.g. resuming
+        # from a long pause) still resolves the correct number of steps.
+        self._tick_clock += dt
+        while self._tick_clock >= SPOT_TICK_SEC:
+            self._tick_clock -= SPOT_TICK_SEC
+            self._step_all()
+
+    def _step_all(self) -> None:
+        for item_id, target in self.targets.items():
+            current = self.prices[item_id]
+            diff = target - current
+            weights = _drift_weights(diff)
+            step = random.choices(STEP_CHOICES, weights=weights)[0]
+            self.prices[item_id] = max(0, current + step)
+
+    def price(self, item_id: str) -> int | None:
+        return self.prices.get(item_id)
+
+    # --- trade actions ---
+    #
+    # all-or-nothing single-unit transactions at the current price. caller
+    # is responsible for triggering them (e.g. on a button click) but
+    # doesn't have to reason about coin accounting or inventory capacity.
+
+    def sell(self, inventory, item_id: str, qty: int = 1) -> bool:
+        price = self.price(item_id)
+        if price is None:
+            return False
+        if not slot_ops.take(inventory.slots, item_id, qty):
+            return False
+        inventory.add_item('coin', price * qty)
+        return True
+
+    def buy(self, inventory, item_id: str, qty: int = 1) -> bool:
+        price = self.price(item_id)
+        if price is None:
+            return False
+        total = price * qty
+        if slot_ops.coin_count(inventory) < total:
+            return False
+        if not slot_ops.can_add(inventory.slots, item_id):
+            return False
+        slot_ops.spend_coin(inventory, total)
+        inventory.add_item(item_id, qty)
+        return True
+
+    def tradeable_ids(self) -> list[str]:
+        # stable order so the spot tab list doesn't shuffle each frame.
+        # sorted by id; later we can switch to a curated order via a
+        # `spot_sort` field on items if we want to control listing order.
+        return sorted(self.targets.keys())

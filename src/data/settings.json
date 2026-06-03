@@ -1,7 +1,7 @@
 {
   "screen_width": 1280,
   "screen_height": 720,
-  "fullscreen": false,
+  "display_mode": "fullscreen",
   "show_hud": true,
   "fps_cap": 120
 }

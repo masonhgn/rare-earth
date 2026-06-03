@@ -1,5 +1,7 @@
 {
     "id": "copper_ore",
     "name": "Copper Ore",
-    "image": "src/data/sprites/items/copper_ore_item.png"
+    "image": "src/data/sprites/items/copper_ore_item.png",
+    "icon_size": 36,
+    "spot_price": 5
 }

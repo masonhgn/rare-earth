@@ -14,7 +14,7 @@ import math
 import pygame as pg
 
 from config import TILE_LENGTH, TITLE, DROPPED_ITEM_SIZE
-from world import World, world_to_tile
+from world import World
 from render import Screen, LAYERS, Minimap
 from inventory import Inventory
 from hud import Hud
@@ -22,6 +22,14 @@ from item import load_item, format_quantity, get_item_icon
 from settings import load_settings, save_settings
 from breaking import BreakSystem
 from factory import FactorySystem, FactoryPanel
+from exchange import ExchangePanel
+from settings_panel import SettingsPanel
+from hud_tabs import HudTabs
+from display import DisplayService
+from spot_market import SpotMarket
+from contracts import ContractSystem, initial_board
+from clock import DayClock
+from save_state import save_game, load_game, save_exists
 import input_handler
 
 
@@ -39,7 +47,7 @@ class Game:
         self.screen = Screen(
             self.settings['screen_width'],
             self.settings['screen_height'],
-            fullscreen=self.settings['fullscreen'],
+            display_mode=self.settings['display_mode'],
         )
 
         self.world = World()
@@ -52,6 +60,35 @@ class Game:
         # factory system + modal panel ui for machine entities.
         self.factory_system = FactorySystem(self.world)
         self.factory_panel = FactoryPanel()
+        # global spot market: per-item prices walking on a 5s real-time
+        # tick. constructed before ExchangePanel so the panel can hold a
+        # ref to it for sell/buy.
+        self.spot_market = SpotMarket()
+        # contract system: settles active contracts on day rollover.
+        self.contract_system = ContractSystem(self.world, self.inventory)
+        # global day clock. on_rollover triggers contract settlement +
+        # autosave; constructed here so we can pass it to ExchangePanel.
+        self.day_clock = DayClock()
+        self.day_clock.on_rollover = self._on_day_rollover
+        # exchange panel (modal, three tabs). day_clock ref is needed at
+        # accept-contract time to stamp due_day.
+        self.exchange_panel = ExchangePanel(self.spot_market, self.inventory, self.day_clock)
+        # display facade: panel + hud_tabs go through this for screen
+        # ops, so they don't need a full Game reference.
+        self.display = DisplayService(self.settings, self.screen, self._position_inventory)
+        # settings modal: ESC opens it, contains display-mode switcher
+        # and save/quit buttons.
+        self.settings_panel = SettingsPanel(
+            self.display,
+            on_save=lambda: save_game(self),
+            on_quit=self.stop,
+        )
+        # hud tabs anchored to the right edge — quick toggles for the
+        # inventory and the settings modal.
+        self.hud_tabs = HudTabs(self.screen, [
+            ('inventory', 'src/data/sprites/ui/tabs/backpack.png', self.inventory.toggle),
+            ('settings', 'src/data/sprites/ui/tabs/settings.png', self._toggle_settings),
+        ])
 
         # ui state
         self.held_item: dict | None = None
@@ -61,14 +98,12 @@ class Game:
         # CLICK_MARKER_MS. None when no recent click.
         self.click_marker: tuple[tuple[float, float], int] | None = None
 
-        # pending break target: set when the player click-walked toward a
-        # breakable. populated as (entity_id_or_None, tile, world_pos_center).
-        # cleared on WASD preempt or successful break.
-        self.pending_break: tuple | None = None
-        # pending factory-open target: set when the player click-walked toward
-        # a machine entity. fires open_for() the moment any footprint tile is
-        # in reach. cleared on WASD preempt.
-        self.pending_open = None
+        # at most one pending click-to-walk action is queued at a time.
+        # populated by input_handler when the player clicks something
+        # they can't reach yet; pending_action.fire() runs the moment
+        # ready() returns True (typically when the player walks within
+        # range). cleared on WASD preempt or after firing.
+        self.pending_action = None
 
         # frame loop state
         self.clock = pg.time.Clock()
@@ -76,7 +111,13 @@ class Game:
         self.running = False
 
 
-        self._seed_world()
+        # restore prior session from disk if a save exists; otherwise
+        # seed the world with the default factory + starter drops.
+        if load_game(self):
+            # load_game replaces day_clock, so re-bind the rollover hook.
+            self.day_clock.on_rollover = self._on_day_rollover
+        else:
+            self._seed_world()
         self._position_inventory()
 
     # --- setup helpers ---
@@ -93,6 +134,20 @@ class Game:
             self.world.add_entity(Entity(load_prototype('factory'), (10 * TILE_LENGTH, 6 * TILE_LENGTH)))
         except ValueError:
             pass
+        # exchange: 4x4 footprint at tile (4, 16) — south of player spawn,
+        # short walk for a fresh player. ValueError swallowed so a regen of
+        # the random overlay grid clipping the spot doesn't crash boot.
+        try:
+            self.world.add_entity(Entity(load_prototype('exchange'), (4 * TILE_LENGTH, 16 * TILE_LENGTH)))
+        except ValueError:
+            pass
+        # seed the contract board on every exchange entity. only fires
+        # on fresh worlds — save loads come through load_game which
+        # restores the board verbatim.
+        for ent in self.world.entities_with('exchange'):
+            es = ent.components['exchange']
+            if not es['board']:
+                es['board'] = initial_board(self.spot_market)
         self.world.spawn_dropped_item('coin', 7, (8 * TILE_LENGTH, 6 * TILE_LENGTH))
         self.world.spawn_dropped_item('copper', 42, (4 * TILE_LENGTH, 6 * TILE_LENGTH))
 
@@ -101,19 +156,55 @@ class Game:
         # player inventory. without this, walking away from the factory while
         # holding an item leaves it stuck in held_item — subsequent world
         # clicks then drop the invisible item and never reach the walk logic.
-        if self.held_item is not None:
-            leftover = self.inventory.add_item(
-                self.held_item['item_id'], self.held_item['quantity'],
-            )
-            if leftover > 0:
-                # inventory full — fall back to dropping at the player's feet
-                player = self.world.get_player()
-                sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-                cx = player.world_x + sw / 2
-                cy = player.world_y + sh / 2
-                self.world.spawn_dropped_item(self.held_item['item_id'], leftover, (cx, cy))
-            self.held_item = None
+        self._deposit_held_item()
         self.factory_panel.close()
+
+    def open_factory_panel(self, entity) -> None:
+        # close any other modal first so only one panel is up at a time.
+        if self.exchange_panel.open:
+            self.close_exchange_panel()
+        self.factory_panel.open_for(entity, (self.screen.width, self.screen.height))
+        self.inventory.open = True
+
+    def open_exchange_panel(self, entity) -> None:
+        if self.factory_panel.open:
+            self.close_factory_panel()
+        self.exchange_panel.open_for(entity, (self.screen.width, self.screen.height))
+        self.inventory.open = True
+
+    def close_exchange_panel(self) -> None:
+        # mirror close_factory_panel — return any cursor-held item to the
+        # inventory (overflow to floor) so it doesn't get stranded.
+        self._deposit_held_item()
+        self.exchange_panel.close()
+
+    def open_modal_for_entity(self, entity) -> None:
+        # dispatch by the prototype's interactable kind. callers don't
+        # need to know which panel matches which entity type, and adding
+        # a new interactable is one entry in this dict.
+        kind = entity.prototype.interactable
+        opener = {
+            'factory': self.open_factory_panel,
+            'exchange': self.open_exchange_panel,
+        }.get(kind)
+        if opener is not None:
+            opener(entity)
+
+    def _deposit_held_item(self) -> None:
+        # return any cursor-held stack to the inventory (overflow to a
+        # floor drop). shared between close_factory_panel and save-on-quit.
+        if self.held_item is None:
+            return
+        leftover = self.inventory.add_item(
+            self.held_item['item_id'], self.held_item['quantity'],
+        )
+        if leftover > 0:
+            player = self.world.get_player()
+            sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+            cx = player.world_x + sw / 2
+            cy = player.world_y + sh / 2
+            self.world.spawn_dropped_item(self.held_item['item_id'], leftover, (cx, cy))
+        self.held_item = None
 
     def _player_collides_with_solid(self) -> bool:
         # is the player's hitbox overlapping any solid entity's footprint?
@@ -216,14 +307,17 @@ class Game:
     # --- display lifecycle ---
 
     def toggle_fullscreen(self) -> None:
-        self.settings['fullscreen'] = not self.settings['fullscreen']
-        save_settings(self.settings)
-        self.screen.resize(
-            self.settings['screen_width'],
-            self.settings['screen_height'],
-            fullscreen=self.settings['fullscreen'],
-        )
-        self._position_inventory()
+        # cycles windowed -> fullscreen -> borderless -> windowed via
+        # the display facade. name kept as toggle_* because F2 has been
+        # "the display key" since before borderless existed.
+        self.display.cycle_mode()
+
+    def _toggle_settings(self) -> None:
+        # called from the settings hud tab. open if closed, close if open.
+        if self.settings_panel.open:
+            self.settings_panel.close()
+        else:
+            self.settings_panel.open_panel(self.display.screen_size)
 
     # --- main loop ---
 
@@ -243,6 +337,12 @@ class Game:
             self._render()
             pg.display.flip()
 
+        # close the factory panel before snapshotting so any cursor-held
+        # item is returned to inventory rather than vanishing on save.
+        if self.factory_panel.open:
+            self.close_factory_panel()
+        self._deposit_held_item()
+        save_game(self)
         save_settings({**self.settings, 'show_hud': self.hud.visible})
         pg.quit()
 
@@ -251,15 +351,24 @@ class Game:
 
     # --- per-frame update ---
 
+    def _on_day_rollover(self, new_day: int) -> None:
+        # settle any forward contracts whose due_day has arrived. fires
+        # before autosave so the resolved outcomes are what gets written.
+        self.contract_system.settle_day_rollover(new_day)
+        # autosave on every day boundary. quick, since the save is a
+        # single json blob and the day clock only ticks once per ~120s.
+        save_game(self)
+
     def _update(self) -> None:
+        self.day_clock.tick(self.dt)
+        self.spot_market.tick(self.dt)
         player = self.world.get_player()
         dx, dy = input_handler.poll_movement(player, self.dt)
         moved_dx = moved_dy = 0.0
         if dx or dy:
             # manual WASD movement preempts any active path.
             player.path = []
-            self.pending_break = None
-            self.pending_open = None
+            self.pending_action = None
             # apply each axis separately so the player slides along solid
             # walls instead of sticking. each axis reverts on collision.
             if dx:
@@ -282,41 +391,25 @@ class Game:
         # using the *actual* movement vector applied this frame.
         self._update_player_animation(player, moved_dx, moved_dy)
 
-        # if a click-walk pointed at a breakable, auto-fire the break the
-        # moment the player is within reach. clears path + pending so the
-        # player stops walking.
-        if self.pending_break is not None:
-            proto, entity_id, tile = self.pending_break
-            if self.world.tile_in_reach(*tile):
-                # also make sure the breakable still exists (might have been
-                # broken by drag-mining mid-walk, etc).
-                still_there = (
-                    entity_id is None and self.world.overlay_at(*tile) is not None
-                ) or (
-                    entity_id is not None and entity_id in self.world.entities
-                )
-                if still_there:
-                    self.break_system.start_break(proto, tile, entity_id=entity_id)
-                player.path = []
-                self.pending_break = None
+        # pending click-to-walk action (break or open). fires the moment
+        # the player is within range; both kinds clear the path so the
+        # player stops walking after the action runs.
+        if self.pending_action is not None and self.pending_action.ready(self):
+            self.pending_action.fire(self)
+            player.path = []
+            self.pending_action = None
 
-        # click-to-open-factory: same pattern as pending_break. fire as soon
-        # as the player is adjacent to any footprint tile of the target machine.
-        if self.pending_open is not None:
-            machine = self.pending_open
-            if any(self.world.tile_in_reach(tx, ty, max_dist=1) for tx, ty in machine.footprint()):
-                self.factory_panel.open_for(machine, (self.screen.width, self.screen.height))
-                self.inventory.open = True
-                player.path = []
-                self.pending_open = None
-
-        # auto-close: if the panel is open and the player has wandered out
-        # of adjacency (manual WASD or path mid-walk), close it and return
-        # any held item to inventory so the player isn't stuck holding it.
+        # auto-close: if a panel is open and the player has wandered out of
+        # adjacency (manual WASD or path mid-walk), close it. each panel
+        # close path returns any cursor-held item to the inventory.
         if self.factory_panel.open and self.factory_panel.entity is not None:
             machine = self.factory_panel.entity
             if not any(self.world.tile_in_reach(tx, ty, max_dist=1) for tx, ty in machine.footprint()):
                 self.close_factory_panel()
+        if self.exchange_panel.open and self.exchange_panel.entity is not None:
+            ent = self.exchange_panel.entity
+            if not any(self.world.tile_in_reach(tx, ty, max_dist=1) for tx, ty in ent.footprint()):
+                self.close_exchange_panel()
 
         # camera follows the player, accounting for sprite size so the player
         # appears centered (not anchored at top-left).
@@ -357,7 +450,10 @@ class Game:
         self._draw_hud()
         self._draw_minimap()
         self.inventory.render(self.screen.surface)
+        self.hud_tabs.render(self.screen.surface)
         self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
+        self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
+        self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self._draw_hover_tooltip()
         self._draw_held_item()
 
@@ -498,12 +594,12 @@ class Game:
             return
         alpha = int(255 * (1 - age / CLICK_MARKER_MS))
         sx, sy = cam.world_to_screen((wx, wy))
-        size = 12
+        size = 8
         # draw on a small SRCALPHA surface so we can apply alpha
         surf = pg.Surface((size * 2 + 4, size * 2 + 4), pg.SRCALPHA)
         color = (255, 220, 80, alpha)
-        pg.draw.line(surf, color, (2, 2), (size * 2 + 2, size * 2 + 2), 3)
-        pg.draw.line(surf, color, (size * 2 + 2, 2), (2, size * 2 + 2), 3)
+        pg.draw.line(surf, color, (2, 2), (size * 2 + 2, size * 2 + 2), 2)
+        pg.draw.line(surf, color, (size * 2 + 2, 2), (2, size * 2 + 2), 2)
         self.screen.renderer.queue('highlight', surf, (sx - size - 2, sy - size - 2))
 
 # --- hud / held item drawn directly on display (screen-space) ---
@@ -517,6 +613,8 @@ class Game:
             n_entities=len(self.world.entities),
             n_dropped=len(self.world.dropped),
         )
+        # day counter is always visible regardless of F3 toggle
+        self.hud.render_day_counter(self.screen.surface, day=self.day_clock.day)
 
     def _draw_minimap(self) -> None:
         player = self.world.get_player()

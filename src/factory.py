@@ -15,11 +15,10 @@
 
 import pygame as pg
 
-from config import (
-    PLAYER_REACH_TILES, TILE_LENGTH,
-)
+from config import TILE_LENGTH
 from item import format_quantity, get_item_icon, load_item, load_recipe
 from resources import load_image
+import slots as slot_ops
 
 
 # panel art is 1254x1254. scaled down to fit on screen.
@@ -53,30 +52,12 @@ class FactorySystem:
 
     def tick(self) -> None:
         now_ms = pg.time.get_ticks()
-        for entity in self.world.entities.values():
-            ms = entity.machine_state
-            if ms is None:
-                continue
+        for entity in self.world.entities_with('machine'):
+            ms = entity.components['machine']
             if ms['current_recipe'] is None:
                 self._try_start_recipe(entity, ms, now_ms)
             else:
                 self._maybe_finish_recipe(ms, now_ms)
-
-    def factory_in_reach(self, player) -> 'Entity | None':
-        # returns the first machine entity any of whose footprint tiles is
-        # within PLAYER_REACH_TILES of the player's *visual center* tile.
-        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        cx = player.world_x + sprite_w / 2
-        cy = player.world_y + sprite_h / 2
-        ptx = int(cx // TILE_LENGTH)
-        pty = int(cy // TILE_LENGTH)
-        for entity in self.world.entities.values():
-            if entity.machine_state is None:
-                continue
-            for tx, ty in entity.footprint():
-                if abs(tx - ptx) <= PLAYER_REACH_TILES and abs(ty - pty) <= PLAYER_REACH_TILES:
-                    return entity
-        return None
 
     # --- internals ---
 
@@ -102,58 +83,29 @@ class FactorySystem:
 
 
 # ---------------------------------------------------------------------------
-# slot helpers used by both the tick logic and the panel
+# recipe slot helpers — thin shims over slot_ops keyed by (item, qty)
+# tuples so we don't construct intermediate dicts.
 # ---------------------------------------------------------------------------
 
 def _inputs_satisfied(input_slots, required) -> bool:
-    for item_id, qty in required:
-        avail = sum(s['quantity'] for s in input_slots
-                    if s and s['item_id'] == item_id)
-        if avail < qty:
-            return False
-    return True
+    return all(
+        slot_ops.count(input_slots, item_id) >= qty
+        for item_id, qty in required
+    )
 
 
 def _consume_inputs(input_slots, required) -> None:
     for item_id, qty in required:
-        remaining = qty
-        for i, s in enumerate(input_slots):
-            if remaining <= 0:
-                break
-            if s and s['item_id'] == item_id:
-                take = min(s['quantity'], remaining)
-                s['quantity'] -= take
-                remaining -= take
-                if s['quantity'] <= 0:
-                    input_slots[i] = None
+        slot_ops.take(input_slots, item_id, qty)
 
 
 def _outputs_fit(output_slots, outputs) -> bool:
-    # without stack_limit, each output needs one slot (existing-matching or
-    # empty). count distinct new item_ids vs available empty slots.
-    existing_ids = {s['item_id'] for s in output_slots if s}
-    available_empty = sum(1 for s in output_slots if s is None)
-    extra_needed = 0
-    for item_id, _ in outputs:
-        if item_id not in existing_ids:
-            extra_needed += 1
-            existing_ids.add(item_id)
-    return extra_needed <= available_empty
+    return slot_ops.can_add_all(output_slots, outputs)
 
 
 def _deposit_outputs(output_slots, outputs) -> None:
     for item_id, qty in outputs:
-        # fill existing stack first
-        for s in output_slots:
-            if s and s['item_id'] == item_id:
-                s['quantity'] += qty
-                break
-        else:
-            # else first empty slot
-            for i, s in enumerate(output_slots):
-                if s is None:
-                    output_slots[i] = {'item_id': item_id, 'quantity': qty}
-                    break
+        slot_ops.add(output_slots, item_id, qty)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +137,17 @@ class FactoryPanel:
     def close(self) -> None:
         self.open = False
         self.entity = None
+
+    def hit(self, mouse_pos: tuple[int, int]) -> bool:
+        # whether the click landed on an interactive part of the panel.
+        # factory deliberately treats panel-background clicks as
+        # "outside" so they fall through to world handling (closes the
+        # panel + walks). matches the long-standing UX.
+        return (
+            self.open
+            and self.entity is not None
+            and self.slot_at_pixel(mouse_pos) is not None
+        )
 
     # --- slot geometry ---
 

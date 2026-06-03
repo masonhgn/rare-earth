@@ -1,5 +1,6 @@
 {
     "id": "rock_chunk",
     "name": "Rock Chunk",
-    "image": "src/data/sprites/items/copper.png"
+    "image": "src/data/sprites/items/copper.png",
+    "spot_price": 2
 }

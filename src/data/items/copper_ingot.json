@@ -1,5 +1,6 @@
 {
     "id": "copper_ingot",
     "name": "Copper Ingot",
-    "image": "src/data/sprites/items/copper.png"
+    "image": "src/data/sprites/items/copper.png",
+    "spot_price": 25
 }

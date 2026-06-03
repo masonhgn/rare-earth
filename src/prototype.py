@@ -14,6 +14,11 @@ from config import ENTITIES_DIR
 
 @dataclass(frozen=True)
 class EntityPrototype:
+    # filename-stem id used to load this prototype. preserved on the
+    # instance so we can serialize the prototype reference by name when
+    # saving entities to disk.
+    proto_id: str
+
     # static composition: 2d list of sprite_ids from the atlas. used when
     # the entity has no animation. each cell is one tile_length square.
     grid: tuple[tuple[str, ...], ...]
@@ -73,6 +78,15 @@ class EntityPrototype:
     # machine_state dict and FactorySystem ticks the entity each frame.
     machine: Optional[dict] = None
 
+    # optional exchange spec: {"drop_box_slots": int}. when set, Entity
+    # initializes exchange_state (drop box, contract board, active list).
+    exchange: Optional[dict] = None
+
+    # interaction kind. when set, clicking on the entity opens the
+    # registered modal panel for that kind ('factory' / 'exchange').
+    # leave None for non-interactable entities (rocks, trees, ore).
+    interactable: Optional[str] = None
+
 
 _cache: dict[str, EntityPrototype] = {}
 
@@ -86,6 +100,7 @@ def load_prototype(name: str) -> EntityPrototype:
         return _cache[name]
     with open(f'{ENTITIES_DIR}/{name}.json') as f:
         raw = json.load(f)
+    raw['proto_id'] = name
     raw['grid'] = _freeze_grid(raw['grid'])
     if 'drops' in raw:
         raw['drops'] = tuple(raw['drops'])

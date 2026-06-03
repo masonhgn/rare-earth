@@ -21,6 +21,7 @@ from config import (
 )
 from item import format_quantity, get_item_icon, load_item
 from resources import load_image
+import slots as slot_ops
 
 
 class Inventory:
@@ -70,18 +71,9 @@ class Inventory:
     # --- mutation ---
 
     def add_item(self, item_id: str, quantity: int) -> int:
-        # stack_limit was removed (items stack without cap), so we either
-        # find a matching stack or grab the first empty slot. returns
-        # leftover only if the inventory is full of mismatched stacks.
-        for i, slot in enumerate(self.slots):
-            if slot and slot['item_id'] == item_id:
-                slot['quantity'] += quantity
-                return 0
-        for i, slot in enumerate(self.slots):
-            if slot is None:
-                self.slots[i] = {'item_id': item_id, 'quantity': quantity}
-                return 0
-        return quantity
+        # shared slot logic — returns leftover that didn't fit (>0 only
+        # when slots are full of mismatched items).
+        return slot_ops.add(self.slots, item_id, quantity)
 
     def add_to_slot(self, item_id: str, quantity: int, slot_index: int) -> int:
         # add into a specific slot. no stack cap: returns leftover only for

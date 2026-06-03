@@ -27,6 +27,10 @@ class ItemPrototype:
     # lets a single bulky-looking item (e.g. coal) sit slightly larger than
     # finer ones (coin, copper) without changing the default for everything.
     icon_size: int | None = None
+    # spot-market eligibility. None = not tradeable on the exchange.
+    # when set, this is both the initial price and the mean-reversion
+    # target the random walk drifts toward.
+    spot_price: int | None = None
 
 
 _cache: dict[str, ItemPrototype] = {}
@@ -62,6 +66,7 @@ def load_item(item_id: str) -> ItemPrototype:
         name=raw['name'],
         image_path=raw['image'],
         icon_size=raw.get('icon_size'),
+        spot_price=raw.get('spot_price'),
     )
     _cache[item_id] = proto
     return proto

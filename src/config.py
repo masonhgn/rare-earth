@@ -54,3 +54,7 @@ INVENTORY_ICON_SIZE = INVENTORY_SLOT_PX - 2
 
 # culling margin (extra px around viewport so things don't pop at the edge)
 CULLING_MARGIN = 96
+
+# day clock: real seconds per in-game day. short value (120) for dev so
+# rollover triggers are testable without waiting hours.
+DAY_LENGTH_SEC = 120

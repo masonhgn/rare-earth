@@ -1,5 +1,6 @@
 {
     "id": "coal",
     "name": "Coal",
-    "image": "src/data/sprites/items/coal.png"
+    "image": "src/data/sprites/items/coal.png",
+    "spot_price": 8
 }

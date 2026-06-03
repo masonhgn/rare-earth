@@ -191,6 +191,13 @@ class World:
     def get_player(self) -> Entity:
         return self.entities['player']
 
+    def entities_with(self, component: str):
+        # iterate entities carrying the named component. avoids the
+        # full-world for-loop + None-check that every system used to do.
+        for ent in self.entities.values():
+            if component in ent.components:
+                yield ent
+
     # --- dropped items + spatial grid ---
 
     def _grid_key(self, world_pos: tuple[float, float]) -> tuple[int, int]:

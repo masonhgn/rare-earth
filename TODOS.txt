@@ -1,0 +1,17 @@
+# todos
+
+## hud tab system (deferred)
+multi-tab hud component pinned to a screen corner. tabs can be
+added/removed independently and the player can switch between them.
+
+planned tabs:
+  - active contracts: list of open contracts with per-contract
+    countdown timers, sorted most-urgent first. on-hud display
+    surfaces the most-urgent timer; full list lives in the tab.
+  - (more tbd as features land)
+
+requirements when picked up:
+  - tabs are individually addressable by string id
+  - each tab owns its own render/update; the hud just dispatches
+  - persisted in save: which tabs are visible, which is focused
+  - placement: configurable corner (default top-right)

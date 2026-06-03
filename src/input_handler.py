@@ -10,6 +10,7 @@ import pygame as pg
 
 from config import TILE_LENGTH, ITEM_ICON_SIZE
 from pathfinding import find_path
+from pending import BreakOnArrival, OpenOnArrival
 from world import world_to_tile
 
 
@@ -54,8 +55,12 @@ def event_loop(game) -> None:
         elif event.type == pg.MOUSEBUTTONDOWN:
             if event.button == 1:
                 _on_left_click(game, event)
-            elif event.button == 3:
-                _on_right_click(game, event)
+
+        elif event.type == pg.MOUSEWHEEL:
+            # wheel scrolls the active exchange tab content (spot list,
+            # contracts list, drop-box slots) when the panel is open.
+            if game.exchange_panel.open:
+                game.exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
 
         elif event.type == pg.MOUSEMOTION:
             if game.held_item is not None:
@@ -75,32 +80,46 @@ def _on_keydown(game, event) -> None:
     elif key == pg.K_F3:
         game.hud.toggle()
     elif key == pg.K_ESCAPE:
-        if game.factory_panel.open:
+        # close the highest-priority open panel first; if none are open,
+        # bring up the settings modal (manual save + display mode).
+        if game.settings_panel.open:
+            game.settings_panel.close()
+        elif game.exchange_panel.open:
+            game.close_exchange_panel()
+        elif game.factory_panel.open:
             game.close_factory_panel()
         else:
-            game.running = False
+            game.settings_panel.open_panel((game.screen.width, game.screen.height))
     elif key == pg.K_q and (mods & pg.KMOD_CTRL):
         game.running = False
 
 
 def _on_left_click(game, event) -> None:
-    # priority order:
-    #   1. clicks inside the open factory panel -> factory slot interaction
-    #   2. clicks inside the open inventory -> slot interaction
-    #   3. mouse currently dragging an item -> drop into world
-    #   4. otherwise -> start a break at the cursor tile
+    # cascade (top to bottom):
+    #   1. always-on hud tabs
+    #   2. open modals (settings, exchange, factory) — each implements
+    #      the (open / hit / handle_click) shape. modal.hit() defines
+    #      what counts as "inside the interactive area"; the exact
+    #      definition differs per modal (exchange = panel rect, factory
+    #      = on a slot, settings = panel rect).
+    #   3. inventory grid clicks
+    #   4. drop held item into world
+    #   5. world click for walk/break/open
     mx, my = event.pos
 
-    if game.factory_panel.open and game.factory_panel.slot_at_pixel((mx, my)) is not None:
-        # only intercept when the click is on an actual slot — clicks on the
-        # panel background (decorative areas, gaps between slots) fall through
-        # to world handling so they close the panel and walk normally.
-        new_held = game.factory_panel.handle_click((mx, my), _held_payload(game.held_item))
-        game.held_item = (
-            None if new_held is None
-            else {**new_held, 'screen_pos': (mx - _HELD_HALF, my - _HELD_HALF)}
-        )
+    # hud tabs sit on top and take priority over modal-outside-dismiss
+    # so clicking the settings tab while settings is open toggles
+    # cleanly rather than first dismissing as an outside-click.
+    if game.hud_tabs.handle_click((mx, my)):
         return
+
+    for modal, on_outside in _modal_cascade(game):
+        if not modal.open:
+            continue
+        if modal.hit((mx, my)):
+            _route_modal_click(game, modal, (mx, my))
+            return
+        on_outside()
 
     if game.inventory.open:
         slot = game.inventory.slot_at_pixel((mx, my))
@@ -132,20 +151,39 @@ def _on_left_click(game, event) -> None:
     if not game.world.in_bounds_tile(*tile):
         return
 
-    # is this a machine (factory) click? — drives the open/close routing.
-    clicked_machine = None
+    # what kind of entity is at the click? — drives the open/close routing.
+    # both machines and the exchange use the same pending_open mechanism,
+    # so we just classify and let the open-or-toggle logic below act on it.
+    #
+    # also catches clicks on walkable tiles immediately adjacent to an
+    # openable's footprint, since the player usually means to interact
+    # with the building when they click on grass right next to it.
+    # without this, clicking a tile one step off the exchange walked
+    # them there but never triggered the open.
+    clicked_openable = None
     entity_here = game.world.get_entity_at_tile(*tile)
-    if entity_here is not None and entity_here.machine_state is not None:
-        clicked_machine = entity_here
+    if entity_here is not None and entity_here.prototype.interactable is not None:
+        clicked_openable = entity_here
+    else:
+        for ent in game.world.entities.values():
+            if ent.prototype.interactable is None:
+                continue
+            if any(max(abs(tile[0] - tx), abs(tile[1] - ty)) <= 1
+                   for tx, ty in ent.footprint()):
+                clicked_openable = ent
+                break
 
-    # toggle: clicking on the machine whose panel is already open closes it.
-    if (clicked_machine is not None and game.factory_panel.open
-            and game.factory_panel.entity is clicked_machine):
-        game.close_factory_panel()
-        return
+    # toggle: clicking on whichever entity's panel is already open closes it.
+    if clicked_openable is not None:
+        if (game.factory_panel.open and game.factory_panel.entity is clicked_openable):
+            game.close_factory_panel()
+            return
+        if (game.exchange_panel.open and game.exchange_panel.entity is clicked_openable):
+            game.close_exchange_panel()
+            return
 
-    # any other world click while the panel is open closes the panel before
-    # processing the click — modal close-on-click outside.
+    # any other world click while a panel is open closes it before
+    # processing — modal close-on-click outside.
     if game.factory_panel.open:
         game.close_factory_panel()
 
@@ -160,11 +198,10 @@ def _on_left_click(game, event) -> None:
 
     # immediate-action shortcuts: if the click target is already in reach,
     # fire the action and skip the path.
-    if clicked_machine is not None and any(
+    if clicked_openable is not None and any(
             game.world.tile_in_reach(tx, ty, max_dist=1)
-            for tx, ty in clicked_machine.footprint()):
-        game.factory_panel.open_for(clicked_machine, (game.screen.width, game.screen.height))
-        game.inventory.open = True
+            for tx, ty in clicked_openable.footprint()):
+        game.open_modal_for_entity(clicked_openable)
         game.click_marker = ((wx, wy), pg.time.get_ticks())
         return
     if breakable is not None and game.world.tile_in_reach(*breakable[2]):
@@ -182,9 +219,16 @@ def _on_left_click(game, event) -> None:
         return
     player.path = path
     game.click_marker = ((wx, wy), pg.time.get_ticks())
-    # remember the pending action so Game._update fires it on arrival.
-    game.pending_break = breakable      # may be None
-    game.pending_open = clicked_machine  # may be None
+    # queue a single arrival action. opener wins over breakable if both
+    # were detected — matches the immediate-action priority in this same
+    # handler when the player is already in range.
+    if clicked_openable is not None:
+        game.pending_action = OpenOnArrival(clicked_openable)
+    elif breakable is not None:
+        proto, entity_id, t = breakable
+        game.pending_action = BreakOnArrival(proto, entity_id, t)
+    else:
+        game.pending_action = None
 
 
 def _click_breakable_at(game, tile):
@@ -207,10 +251,31 @@ def _click_breakable_at(game, tile):
     return (proto, None, tile)
 
 
-def _on_right_click(game, event) -> None:
-    # right-click is currently a no-op. (rock placement was removed in the
-    # click-to-walk pass.)
-    return
+def _modal_cascade(game):
+    # ordered list of (modal, outside-click handler) tuples. order = top
+    # of z-stack first. each `on_outside` is what happens when the click
+    # missed that modal's interactive area — settings/exchange use it to
+    # dismiss, factory uses it as a pass-through so world handling still
+    # runs (this matches the long-standing per-modal close behaviour).
+    return [
+        (game.settings_panel, game.settings_panel.close),
+        (game.exchange_panel, game.close_exchange_panel),
+        (game.factory_panel, lambda: None),
+    ]
+
+
+def _route_modal_click(game, modal, pos) -> None:
+    # for modals that don't deal with held items (settings), handle_click
+    # takes no held arg. for the others we feed the cursor payload in
+    # and read the new held back out.
+    if modal is game.settings_panel:
+        modal.handle_click(pos)
+        return
+    new_held = modal.handle_click(pos, _held_payload(game.held_item))
+    game.held_item = (
+        None if new_held is None
+        else {**new_held, 'screen_pos': (pos[0] - _HELD_HALF, pos[1] - _HELD_HALF)}
+    )
 
 
 def _held_payload(held: dict | None) -> dict | None:
