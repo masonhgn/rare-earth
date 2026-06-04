@@ -22,5 +22,21 @@
         "margin": 1,
         "spacing": 1,
         "fps": 7
+    },
+    "player_walking_up": {
+        "file": "src/data/sprites/player/up.png",
+        "frames": 4,
+        "size": [128, 128],
+        "margin": 1,
+        "spacing": 1,
+        "fps": 7
+    },
+    "player_walking_down": {
+        "file": "src/data/sprites/player/down.png",
+        "frames": 4,
+        "size": [128, 128],
+        "margin": 1,
+        "spacing": 1,
+        "fps": 7
     }
 }

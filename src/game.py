@@ -260,23 +260,26 @@ class Game:
 
     def _update_player_animation(self, player, dx: float, dy: float) -> None:
         # single canonical animation update, run after movement is resolved.
-        # only sets idle when nothing actually moved this frame. preserves
-        # the existing horizontal facing during pure-vertical movement, so
-        # north/south path segments don't flicker the sprite to front-facing.
+        # facing follows the dominant axis; ties (|dx| == |dy|, i.e. diagonal
+        # movement) go to horizontal — preserves the previous left/right
+        # preference and avoids flicker when the path follower bounces
+        # between near-equal components.
         if player.anim is None:
             return
         if dx == 0 and dy == 0:
             player.anim.set_state('idle')
             return
-        # threshold avoids flipping facing for tiny rounding-noise dx values
-        if dx > 0.5:
-            player.anim.set_state('walking_right')
-        elif dx < -0.5:
-            player.anim.set_state('walking_left')
-        elif player.anim.current_state not in ('walking_left', 'walking_right'):
-            # we ARE moving (pure vertical) but were idle — pick a default
-            # facing so the sprite doesn't stay front-facing mid-walk.
-            player.anim.set_state('walking_right')
+        # 0.5 threshold avoids flipping facing for sub-pixel rounding noise.
+        if abs(dx) >= abs(dy):
+            if dx > 0.5:
+                player.anim.set_state('walking_right')
+            elif dx < -0.5:
+                player.anim.set_state('walking_left')
+        else:
+            if dy > 0.5:
+                player.anim.set_state('walking_down')
+            elif dy < -0.5:
+                player.anim.set_state('walking_up')
 
     def _clamp_player_to_bounds(self) -> None:
         # keep the player's *hitbox* inside the map rectangle. clamping the
