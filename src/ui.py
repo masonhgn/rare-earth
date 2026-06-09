@@ -17,10 +17,22 @@ from resources import load_image
 from ui_theme import (
     COLOR_BUTTON_BG, COLOR_BUTTON_BG_DISABLED, COLOR_BUTTON_BORDER,
     COLOR_BUTTON_TEXT_DISABLED, COLOR_SCROLLBAR_THUMB, COLOR_SCROLLBAR_TRACK,
-    COLOR_SLOT_BG, COLOR_SLOT_BORDER, COLOR_TAB_ACTIVE_BG,
+    COLOR_SLOT_BG, COLOR_SLOT_BORDER, COLOR_SLOT_QTY_TEXT, COLOR_TAB_ACTIVE_BG,
     COLOR_TAB_ACTIVE_BORDER, COLOR_TAB_INACTIVE_BG, COLOR_TAB_INACTIVE_BORDER,
     COLOR_TAB_INACTIVE_TEXT, COLOR_TEXT_BODY, COLOR_TEXT_PRIMARY,
+    RADIUS_TAB, RADIUS_BUTTON, RADIUS_SLOT, RADIUS_SCROLLBAR, get_font,
 )
+
+
+def draw_button(surface, rect, label, font, *, bg, border, text_color,
+                radius: int = RADIUS_BUTTON) -> None:
+    # shared rounded-rect button paint. used by Button and by panels that
+    # need active/inactive button colors (e.g. settings display-mode row),
+    # so the look stays identical everywhere.
+    pg.draw.rect(surface, bg, rect, border_radius=radius)
+    pg.draw.rect(surface, border, rect, width=2, border_radius=radius)
+    text = font.render(label, True, text_color)
+    surface.blit(text, text.get_rect(center=rect.center))
 
 
 class NineSliceSkin:
@@ -99,8 +111,8 @@ class TabStrip:
             is_active = i == self.active
             bg = COLOR_TAB_ACTIVE_BG if is_active else COLOR_TAB_INACTIVE_BG
             border = COLOR_TAB_ACTIVE_BORDER if is_active else COLOR_TAB_INACTIVE_BORDER
-            pg.draw.rect(surface, bg, r, border_radius=6)
-            pg.draw.rect(surface, border, r, width=2, border_radius=6)
+            pg.draw.rect(surface, bg, r, border_radius=RADIUS_TAB)
+            pg.draw.rect(surface, border, r, width=2, border_radius=RADIUS_TAB)
             color = COLOR_TEXT_PRIMARY if is_active else COLOR_TAB_INACTIVE_TEXT
             text = self.font.render(label, True, color)
             surface.blit(text, text.get_rect(center=r.center))
@@ -125,10 +137,8 @@ class Button:
             bg, txt = COLOR_BUTTON_BG, COLOR_TEXT_BODY
         else:
             bg, txt = COLOR_BUTTON_BG_DISABLED, COLOR_BUTTON_TEXT_DISABLED
-        pg.draw.rect(surface, bg, self.rect, border_radius=5)
-        pg.draw.rect(surface, COLOR_BUTTON_BORDER, self.rect, width=2, border_radius=5)
-        text = self.font.render(self.label, True, txt)
-        surface.blit(text, text.get_rect(center=self.rect.center))
+        draw_button(surface, self.rect, self.label, self.font,
+                    bg=bg, border=COLOR_BUTTON_BORDER, text_color=txt)
 
     def contains(self, pos: tuple[int, int]) -> bool:
         return self.enabled and self.rect.collidepoint(pos)
@@ -137,20 +147,28 @@ class Button:
 class SlotGrid:
     # cols x rows of clickable inventory slots. mirrors Inventory's
     # drag/drop semantics so the same held_item mechanic works for the
-    # drop box, factory inputs (future migration), etc.
+    # drop box, factory input/output grids and the player inventory.
     #
     # callers pass the slot list to render() and handle_click() — slots
     # live on whichever owner (inventory, exchange entity, machine) so
     # the widget stays purely visual.
+    #
+    # draw_cells=False suits panels whose slot wells are baked into the
+    # background artwork (inventory, factory) — only icons/labels are
+    # drawn on top. icon_size overrides the default (slot_size - 6) so a
+    # panel can keep its established icon scale.
     def __init__(self, rect, cols: int, rows: int, slot_size: int, *,
-                 slot_gap: int = 6, font: pg.font.Font | None = None) -> None:
+                 slot_gap: int = 6, font: pg.font.Font | None = None,
+                 draw_cells: bool = True, icon_size: int | None = None) -> None:
         self.rect = pg.Rect(rect)
         self.cols = cols
         self.rows = rows
         self.slot_size = slot_size
         self.slot_gap = slot_gap
         self.pitch = slot_size + slot_gap
-        self.font = font or pg.font.Font(None, 16)
+        self.font = font or get_font(16)
+        self.draw_cells = draw_cells
+        self.icon_size = icon_size if icon_size is not None else slot_size - 6
 
     def total_size(self) -> tuple[int, int]:
         # cumulative width/height including all slots + gaps. handy when
@@ -189,33 +207,38 @@ class SlotGrid:
         from item import load_item, get_item_icon, format_quantity
         for i in range(self.cols * self.rows):
             x, y = self._slot_topleft(i)
-            cell = pg.Rect(x, y, self.slot_size, self.slot_size)
-            pg.draw.rect(surface, COLOR_SLOT_BG, cell, border_radius=4)
-            pg.draw.rect(surface, COLOR_SLOT_BORDER, cell, width=2, border_radius=4)
+            if self.draw_cells:
+                cell = pg.Rect(x, y, self.slot_size, self.slot_size)
+                pg.draw.rect(surface, COLOR_SLOT_BG, cell, border_radius=RADIUS_SLOT)
+                pg.draw.rect(surface, COLOR_SLOT_BORDER, cell, width=2, border_radius=RADIUS_SLOT)
             if i >= len(slots):
                 continue
             slot = slots[i]
             if slot is None:
                 continue
             proto = load_item(slot['item_id'])
-            icon_size = self.slot_size - 6
-            icon = get_item_icon(proto, size=icon_size)
+            icon = get_item_icon(proto, size=self.icon_size)
             ix = x + (self.slot_size - icon.get_width()) // 2
             iy = y + (self.slot_size - icon.get_height()) // 2
             surface.blit(icon, (ix, iy))
             if slot['quantity'] > 1:
                 label = self.font.render(
-                    format_quantity(slot['quantity']), True, (255, 255, 255),
+                    format_quantity(slot['quantity']), True, COLOR_SLOT_QTY_TEXT,
                 )
                 label_rect = label.get_rect(
                     bottomright=(x + self.slot_size - 3, y + self.slot_size - 3),
                 )
                 surface.blit(label, label_rect)
 
-    def handle_click(self, idx: int | None, held: dict | None, slots: list) -> dict | None:
+    def handle_click(self, idx: int | None, held: dict | None, slots: list, *,
+                     take_only: bool = False) -> dict | None:
         # mirrors Inventory.handle_click — pick / place / merge / swap.
         # mutates `slots` in place; returns the new held_item.
+        # take_only slots (factory outputs) ignore a held stack: you can
+        # only pull from them, never deposit.
         if idx is None or idx < 0 or idx >= len(slots):
+            return held
+        if take_only and held is not None:
             return held
         slot = slots[idx]
         if held is None:
@@ -285,13 +308,13 @@ class ScrollList:
         margin = 4
         track = pg.Rect(self.rect.right - bar_w - margin, self.rect.y + margin,
                         bar_w, self.rect.height - 2 * margin)
-        pg.draw.rect(surface, COLOR_SCROLLBAR_TRACK, track, border_radius=3)
+        pg.draw.rect(surface, COLOR_SCROLLBAR_TRACK, track, border_radius=RADIUS_SCROLLBAR)
         # thumb height proportional to viewport / content
         thumb_h = max(20, int(track.height * self.rect.height / content_h))
         max_off = max(1, content_h - self.rect.height)
         thumb_y = track.y + int((self.scroll_offset / max_off) * (track.height - thumb_h))
         thumb = pg.Rect(track.x, thumb_y, bar_w, thumb_h)
-        pg.draw.rect(surface, COLOR_SCROLLBAR_THUMB, thumb, border_radius=3)
+        pg.draw.rect(surface, COLOR_SCROLLBAR_THUMB, thumb, border_radius=RADIUS_SCROLLBAR)
 
     def handle_scroll(self, amount: int) -> None:
         # one wheel notch moves ~1 row worth of pixels. positive = up.

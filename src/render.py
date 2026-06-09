@@ -16,14 +16,16 @@
 # render order is `LAYERS` below; the game-loop calls Screen.renderer.flush(LAYERS)
 # once per frame after queueing.
 
+import math
 from collections import defaultdict
 
 import pygame as pg
 
 from config import (
     SPRITES_FILE, ANIMATIONS_FILE, TILE_LENGTH, CULLING_MARGIN,
-    SCREEN_WIDTH, SCREEN_HEIGHT,
+    SCREEN_WIDTH, SCREEN_HEIGHT, DROPPED_ITEM_SIZE,
 )
+from item import load_item, get_item_icon
 from spritesheet import load_sprites
 from animation import AnimationLibrary
 
@@ -32,6 +34,9 @@ from animation import AnimationLibrary
 # terrain and shadow so ore/feature decoration draws on top of the base
 # terrain but underneath everything dynamic.
 LAYERS = ['terrain', 'overlay', 'shadow', 'dropped', 'entity', 'player', 'highlight']
+
+# how long the yellow click marker stays visible (fades to 0 over this span)
+CLICK_MARKER_MS = 500
 
 
 class Camera:
@@ -256,3 +261,172 @@ class Minimap:
         px = x0 + int(player_world_pos[0] / TILE_LENGTH * cs)
         py = y0 + int(player_world_pos[1] / TILE_LENGTH * cs)
         pg.draw.circle(target, (255, 230, 70), (px, py), max(2, cs))
+
+
+class WorldRenderer:
+    # queues the world layers (terrain -> overlay -> entities -> dropped ->
+    # click marker) plus the break-system visuals onto the screen renderer,
+    # then flushes in LAYERS order. holds only stable refs; per-frame cursor
+    # state (the click marker) is passed into flush() and returned back so
+    # Game stays the owner of that field.
+    def __init__(self, screen, world, break_system):
+        self.screen = screen
+        self.world = world
+        self.break_system = break_system
+
+    def flush(self, cam, culling, click_marker):
+        self._queue_terrain(cam, culling)
+        self._queue_overlay(cam, culling)
+        self._queue_entities(cam, culling)
+        self._queue_dropped(cam, culling)
+        click_marker = self._queue_click_marker(cam, click_marker)
+        self.break_system.queue_progress_bar(self.screen.renderer, cam)
+        self.break_system.queue_particles(self.screen.renderer, cam, culling)
+        self.screen.renderer.flush(LAYERS)
+        return click_marker
+
+    def _queue_terrain(self, cam, culling) -> None:
+        world = self.world
+        sprites = self.screen.sprites
+        tx0, ty0, tx1, ty1 = culling.tile_range(cam.offset, world.width, world.height)
+        for ty in range(ty0, ty1):
+            row = world.map_grid[ty]
+            for tx in range(tx0, tx1):
+                img = sprites.get(row[tx])
+                if img is None:
+                    continue
+                sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
+                self.screen.renderer.queue('terrain', img, (sx, sy))
+
+    def _queue_overlay(self, cam, culling) -> None:
+        # sparse layer (most cells are None). ore tiles use alpha so the
+        # terrain underneath shows through between chunks. break visuals
+        # (jitter + flash) come from break_system, which returns zeros for
+        # any tile that isn't the current target.
+        world = self.world
+        sprites = self.screen.sprites
+        tx0, ty0, tx1, ty1 = culling.tile_range(cam.offset, world.width, world.height)
+        now_ms = pg.time.get_ticks()
+
+        for ty in range(ty0, ty1):
+            row = world.overlay_grid[ty]
+            for tx in range(tx0, tx1):
+                tile_id = row[tx]
+                if tile_id is None:
+                    continue
+                img = sprites.get(tile_id)
+                if img is None:
+                    continue
+                jx, jy, flash_alpha = self.break_system.visuals_for_overlay_tile((tx, ty), now_ms)
+                sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
+                self.screen.renderer.queue('overlay', img, (sx + jx, sy + jy))
+                if flash_alpha > 0:
+                    self._queue_flash('overlay', img.get_size(), (sx + jx, sy + jy), flash_alpha)
+
+    def _queue_entities(self, cam, culling) -> None:
+        player = self.world.get_player()
+        now_ms = pg.time.get_ticks()
+        sprites = self.screen.sprites
+        animations = self.screen.animations
+
+        # split placed entities (non-player) for crude y-sort, then player last
+        placed = [e for e in self.world.entities.values() if e is not player]
+        placed.sort(key=lambda e: e.world_y)
+        for entity in placed:
+            self._queue_one_entity(entity, cam, culling, sprites, animations, now_ms, layer='entity')
+        self._queue_one_entity(player, cam, culling, sprites, animations, now_ms, layer='player')
+
+    def _queue_one_entity(self, entity, cam, culling, sprites, animations, now_ms, *, layer: str) -> None:
+        proto = entity.prototype
+        ox, oy = proto.render_offset or (0, 0)
+        jx, jy, flash_alpha = self.break_system.visuals_for_entity(entity.id, now_ms)
+
+        if entity.anim is not None:
+            frame = entity.anim.advance(animations, now_ms)
+            size = proto.sprite_size or frame.get_size()
+            if not culling.point_visible((entity.world_x + ox, entity.world_y + oy), cam.offset, size=size):
+                return
+            sx, sy = cam.world_to_screen((entity.world_x + ox, entity.world_y + oy))
+            if proto.shadow:
+                self._queue_shadow(frame, (sx, sy))
+            self.screen.renderer.queue(layer, frame, (sx + jx, sy + jy))
+            if flash_alpha > 0:
+                self._queue_flash(layer, frame.get_size(), (sx + jx, sy + jy), flash_alpha)
+            return
+
+        # composed from sprite cells per row/col in the prototype grid.
+        # culling + flash use the actual image size so oversized file sprites
+        # (e.g. a 128x128 tree in a 1x1 grid) aren't cut off and their break
+        # flash covers the whole sprite, not just a 64x64 corner.
+        for r, row in enumerate(proto.grid):
+            for c, sprite_id in enumerate(row):
+                img = sprites.get(sprite_id)
+                if img is None:
+                    continue
+                iw, ih = img.get_size()
+                wx = entity.world_x + c * TILE_LENGTH + ox
+                wy = entity.world_y + r * TILE_LENGTH + oy
+                if not culling.point_visible((wx, wy), cam.offset, size=(iw, ih)):
+                    continue
+                sx, sy = cam.world_to_screen((wx, wy))
+                self.screen.renderer.queue(layer, img, (sx + jx, sy + jy))
+                if flash_alpha > 0:
+                    self._queue_flash(layer, (iw, ih), (sx + jx, sy + jy), flash_alpha)
+
+    def _queue_flash(self, layer: str, size: tuple[int, int], screen_pos: tuple[float, float], alpha: int) -> None:
+        # semi-transparent white blit on top of the sprite. acts like an
+        # additive flash because the underlying sprite shows through where
+        # alpha < 255.
+        overlay = pg.Surface(size, pg.SRCALPHA)
+        overlay.fill((255, 255, 255, alpha))
+        self.screen.renderer.queue(layer, overlay, screen_pos)
+
+    def _queue_shadow(self, image, screen_pos: tuple[float, float]) -> None:
+        # chud-style: a darkened, scaled-down silhouette of the current frame
+        # blitted just below the entity. BLEND_RGBA_MULT preserves the sprite's
+        # alpha shape (so the shadow follows the character outline, not a
+        # rectangle) while crushing rgb to black.
+        sw, sh = image.get_size()
+        shadow_w, shadow_h = int(sw * 0.78), int(sh * 0.45)
+        shadow = pg.transform.smoothscale(image, (shadow_w, shadow_h))
+        shadow.fill((0, 0, 0, 130), None, pg.BLEND_RGBA_MULT)
+        sx, sy = screen_pos
+        x_off = (sw - shadow_w) // 2
+        y_off = sh - shadow_h - 4
+        self.screen.renderer.queue('shadow', shadow, (sx + x_off, sy + y_off))
+
+    def _queue_dropped(self, cam, culling) -> None:
+        # bounce wave so loose items feel alive
+        now_ms = pg.time.get_ticks()
+        amplitude = 4
+        for drop in self.world.dropped:
+            if not culling.point_visible(drop.world_pos, cam.offset, size=(DROPPED_ITEM_SIZE, DROPPED_ITEM_SIZE)):
+                continue
+            proto = load_item(drop.item_id)
+            img = get_item_icon(proto)
+            # crude bounce per item phase-shifted by world pos to desync
+            phase = (drop.world_x + drop.world_y) * 0.01
+            offset_y = amplitude * math.sin(now_ms / 1000.0 * math.pi + phase)
+            sx, sy = cam.world_to_screen(drop.world_pos)
+            self.screen.renderer.queue('dropped', img, (sx, sy + offset_y))
+
+    def _queue_click_marker(self, cam, click_marker):
+        # yellow X at the click point, fading over CLICK_MARKER_MS. returns
+        # the marker unchanged, or None once it has fully faded.
+        if click_marker is None:
+            return None
+        (wx, wy), born_ms = click_marker
+        now_ms = pg.time.get_ticks()
+        age = now_ms - born_ms
+        if age >= CLICK_MARKER_MS:
+            return None
+        alpha = int(255 * (1 - age / CLICK_MARKER_MS))
+        sx, sy = cam.world_to_screen((wx, wy))
+        size = 8
+        # draw on a small SRCALPHA surface so we can apply alpha
+        surf = pg.Surface((size * 2 + 4, size * 2 + 4), pg.SRCALPHA)
+        color = (255, 220, 80, alpha)
+        pg.draw.line(surf, color, (2, 2), (size * 2 + 2, size * 2 + 2), 2)
+        pg.draw.line(surf, color, (size * 2 + 2, 2), (2, size * 2 + 2), 2)
+        self.screen.renderer.queue('highlight', surf, (sx - size - 2, sy - size - 2))
+        return click_marker

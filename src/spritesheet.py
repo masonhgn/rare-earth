@@ -35,6 +35,15 @@ import json
 import pygame as pg
 
 
+def slice_cell(sheet: pg.Surface, x: int, y: int, w: int, h: int) -> pg.Surface:
+    # copy a (w x h) region at (x, y) out of `sheet` into its own alpha
+    # surface. shared by the atlas loader here and the animation strip
+    # slicer so the "cut a cell from a sheet" idiom lives in one place.
+    cell = pg.Surface((w, h), pg.SRCALPHA).convert_alpha()
+    cell.blit(sheet, (0, 0), (x, y, w, h))
+    return cell
+
+
 def load_sprites(config_file: str) -> dict[str, pg.Surface]:
     with open(config_file) as f:
         config = json.load(f)
@@ -59,9 +68,7 @@ def _load_atlas(spec: dict) -> dict[str, pg.Surface]:
         row, col = pos
         x = margin + col * step
         y = margin + row * step
-        surf = pg.Surface((tile_size, tile_size), pg.SRCALPHA).convert_alpha()
-        surf.blit(sheet, (0, 0), (x, y, tile_size, tile_size))
-        out[name] = surf
+        out[name] = slice_cell(sheet, x, y, tile_size, tile_size)
     return out
 
 

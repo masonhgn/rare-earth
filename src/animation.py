@@ -13,6 +13,8 @@
 import json
 import pygame as pg
 
+from spritesheet import slice_cell
+
 
 class AnimationLibrary:
     def __init__(self, animations_file: str) -> None:
@@ -34,9 +36,7 @@ class AnimationLibrary:
         for i in range(n_frames):
             x = margin + i * (frame_w + spacing)
             y = margin
-            frame = pg.Surface((frame_w, frame_h), pg.SRCALPHA).convert_alpha()
-            frame.blit(sheet, (0, 0), (x, y, frame_w, frame_h))
-            frames.append(frame)
+            frames.append(slice_cell(sheet, x, y, frame_w, frame_h))
         return frames
 
     def get_frames(self, anim_id: str) -> list[pg.Surface]:

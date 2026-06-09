@@ -15,9 +15,10 @@
 
 import pygame as pg
 
-from config import TILE_LENGTH
-from item import format_quantity, get_item_icon, load_item, load_recipe
+from item import get_item_icon, load_item, load_recipe
 from resources import load_image
+from ui import SlotGrid
+from ui_theme import get_font
 import slots as slot_ops
 
 
@@ -120,11 +121,22 @@ class FactoryPanel:
         # size so smoothscale produces cleaner edges than nearest-neighbor.
         raw = load_image(PANEL_FILE)
         self.panel_image = pg.transform.smoothscale(raw, (PANEL_SIZE, PANEL_SIZE))
-        self.font = pg.font.Font(None, 22)
-        self.font_small = pg.font.Font(None, 16)
+        self.font = get_font(22)
+        self.font_small = get_font(16)
         # set in open_for() so input_handler can collidepoint before render
         self.origin: tuple[int, int] = (0, 0)
         self.rect = pg.Rect(0, 0, PANEL_SIZE, PANEL_SIZE)
+        # slot wells are baked into the panel art (draw_cells=False); the
+        # grids are re-anchored to self.origin each frame in _sync_grids.
+        gap = SLOT_PITCH - SLOT_SIZE
+        self.input_grid = SlotGrid(
+            (0, 0, 0, 0), GRID_COLS, GRID_ROWS, SLOT_SIZE, slot_gap=gap,
+            font=self.font_small, draw_cells=False, icon_size=SLOT_ICON_SIZE,
+        )
+        self.output_grid = SlotGrid(
+            (0, 0, 0, 0), GRID_COLS, GRID_ROWS, SLOT_SIZE, slot_gap=gap,
+            font=self.font_small, draw_cells=False, icon_size=SLOT_ICON_SIZE,
+        )
 
     def open_for(self, entity, screen_size: tuple[int, int]) -> None:
         self.entity = entity
@@ -151,33 +163,22 @@ class FactoryPanel:
 
     # --- slot geometry ---
 
-    def _slot_topleft(self, grid_origin: tuple[int, int], slot_index: int) -> tuple[int, int]:
-        col = slot_index % GRID_COLS
-        row = slot_index // GRID_COLS
-        ox, oy = grid_origin
-        return (
-            self.origin[0] + ox + col * SLOT_PITCH,
-            self.origin[1] + oy + row * SLOT_PITCH,
-        )
+    def _sync_grids(self) -> None:
+        # re-anchor both grids to the panel origin before any query/draw;
+        # origin is recomputed each frame for screen-resize safety.
+        ox, oy = self.origin
+        self.input_grid.rect.topleft = (ox + INPUT_GRID_ORIGIN[0], oy + INPUT_GRID_ORIGIN[1])
+        self.output_grid.rect.topleft = (ox + OUTPUT_GRID_ORIGIN[0], oy + OUTPUT_GRID_ORIGIN[1])
 
     def slot_at_pixel(self, mouse_pos: tuple[int, int]) -> tuple[str, int] | None:
         # returns (kind, slot_index) where kind is 'input' or 'output', or None.
-        for kind, origin in (('input', INPUT_GRID_ORIGIN), ('output', OUTPUT_GRID_ORIGIN)):
-            ox, oy = origin
-            rel_x = mouse_pos[0] - self.origin[0] - ox
-            rel_y = mouse_pos[1] - self.origin[1] - oy
-            if rel_x < 0 or rel_y < 0:
-                continue
-            col = rel_x // SLOT_PITCH
-            row = rel_y // SLOT_PITCH
-            if col >= GRID_COLS or row >= GRID_ROWS:
-                continue
-            # reject the gap between cells
-            if rel_x % SLOT_PITCH >= SLOT_SIZE:
-                continue
-            if rel_y % SLOT_PITCH >= SLOT_SIZE:
-                continue
-            return (kind, int(row * GRID_COLS + col))
+        self._sync_grids()
+        i = self.input_grid.slot_at_pixel(mouse_pos)
+        if i is not None:
+            return ('input', i)
+        o = self.output_grid.slot_at_pixel(mouse_pos)
+        if o is not None:
+            return ('output', o)
         return None
 
     # --- mouse interaction ---
@@ -190,37 +191,8 @@ class FactoryPanel:
         kind, idx = slot_info
         ms = self.entity.machine_state
         if kind == 'output':
-            return self._click_output(ms['output_slots'], idx, held)
-        return self._click_input(ms['input_slots'], idx, held)
-
-    def _click_output(self, output_slots, idx: int, held: dict | None) -> dict | None:
-        # outputs are take-only: holding an item over them is ignored.
-        if held is not None:
-            return held
-        slot = output_slots[idx]
-        if slot is None:
-            return None
-        output_slots[idx] = None
-        return slot
-
-    def _click_input(self, input_slots, idx: int, held: dict | None) -> dict | None:
-        # same drag/drop semantics as Inventory.handle_click for input slots.
-        slot = input_slots[idx]
-        if held is None:
-            if slot is None:
-                return None
-            input_slots[idx] = None
-            return slot
-        if slot is None or slot['item_id'] == held['item_id']:
-            if slot is None:
-                input_slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
-            else:
-                slot['quantity'] += held['quantity']
-            return None
-        # different item: swap
-        new_held = slot
-        input_slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
-        return new_held
+            return self.output_grid.handle_click(idx, held, ms['output_slots'], take_only=True)
+        return self.input_grid.handle_click(idx, held, ms['input_slots'])
 
     # --- render ---
 
@@ -235,27 +207,10 @@ class FactoryPanel:
         surface.blit(self.panel_image, self.origin)
 
         ms = self.entity.machine_state
-        self._draw_slot_contents(surface, ms['input_slots'], INPUT_GRID_ORIGIN)
-        self._draw_slot_contents(surface, ms['output_slots'], OUTPUT_GRID_ORIGIN)
+        self._sync_grids()
+        self.input_grid.render(surface, ms['input_slots'])
+        self.output_grid.render(surface, ms['output_slots'])
         self._draw_header(surface, ms)
-
-    def _draw_slot_contents(self, surface, slots, origin) -> None:
-        for i, slot in enumerate(slots):
-            if slot is None:
-                continue
-            proto = load_item(slot['item_id'])
-            icon = get_item_icon(proto, size=SLOT_ICON_SIZE)
-            pos = self._slot_topleft(origin, i)
-            # center icon inside the slot cell
-            icon_pos = (
-                pos[0] + (SLOT_SIZE - icon.get_width()) // 2,
-                pos[1] + (SLOT_SIZE - icon.get_height()) // 2,
-            )
-            surface.blit(icon, icon_pos)
-            if slot['quantity'] > 1:
-                label = self.font_small.render(format_quantity(slot['quantity']), True, (255, 255, 255))
-                label_rect = label.get_rect(bottomright=(pos[0] + SLOT_SIZE - 2, pos[1] + SLOT_SIZE - 2))
-                surface.blit(label, label_rect)
 
     def _draw_header(self, surface, ms) -> None:
         header_x = self.origin[0] + HEADER_RECT.x

@@ -19,8 +19,9 @@ from config import (
     INVENTORY_SLOT_PX, INVENTORY_BORDER_PX, INVENTORY_UI_FILE,
     INVENTORY_ICON_SIZE,
 )
-from item import format_quantity, get_item_icon, load_item
 from resources import load_image
+from ui import SlotGrid
+from ui_theme import get_font
 import slots as slot_ops
 
 
@@ -32,41 +33,32 @@ class Inventory:
         self.rect = self.panel_image.get_rect(topleft=(0, 0))
         # origin = where the panel is drawn on screen each frame
         self.origin = (0, 0)
-        self.font = pg.font.Font(None, 15)
+        self.font = get_font(15)
+        # slot wells are baked into the panel art, so draw_cells=False and
+        # only icons/labels get drawn on top. slot_size = pitch - 2
+        # reproduces the old 2px seam between cells exactly.
+        self.grid = SlotGrid(
+            (0, 0, 0, 0), INVENTORY_COLS, INVENTORY_ROWS, INVENTORY_SLOT_PX - 2,
+            slot_gap=2, font=self.font, draw_cells=False,
+            icon_size=INVENTORY_ICON_SIZE,
+        )
 
     def toggle(self) -> None:
         self.open = not self.open
 
     # --- slot geometry ---
 
-    def _slot_topleft(self, slot_index: int) -> tuple[int, int]:
-        col = slot_index % INVENTORY_COLS
-        row = slot_index // INVENTORY_COLS
-        ox, oy = self.origin
-        x = ox + INVENTORY_BORDER_PX + col * INVENTORY_SLOT_PX
-        y = oy + INVENTORY_BORDER_PX + row * INVENTORY_SLOT_PX
-        return (x, y)
+    def _sync_grid(self) -> None:
+        # the grid lives at origin + border; origin moves each frame
+        # (screen resize / repositioning) so re-anchor before any query.
+        self.grid.rect.topleft = (
+            self.origin[0] + INVENTORY_BORDER_PX,
+            self.origin[1] + INVENTORY_BORDER_PX,
+        )
 
     def slot_at_pixel(self, mouse_pos: tuple[int, int]) -> int | None:
-        # return slot index under the mouse, or None if outside / on a border.
-        # the inner area starts at origin + INVENTORY_BORDER_PX. each slot is
-        # INVENTORY_SLOT_PX wide; we treat the last 2px of each slot as border.
-        mx, my = mouse_pos
-        ox, oy = self.origin
-        rel_x = mx - ox - INVENTORY_BORDER_PX
-        rel_y = my - oy - INVENTORY_BORDER_PX
-        if rel_x < 0 or rel_y < 0:
-            return None
-        col = rel_x // INVENTORY_SLOT_PX
-        row = rel_y // INVENTORY_SLOT_PX
-        if col >= INVENTORY_COLS or row >= INVENTORY_ROWS:
-            return None
-        # reject the 2px border between slots (last 2px of each slot cell)
-        if rel_x % INVENTORY_SLOT_PX >= INVENTORY_SLOT_PX - 2:
-            return None
-        if rel_y % INVENTORY_SLOT_PX >= INVENTORY_SLOT_PX - 2:
-            return None
-        return int(row * INVENTORY_COLS + col)
+        self._sync_grid()
+        return self.grid.slot_at_pixel(mouse_pos)
 
     # --- mutation ---
 
@@ -75,52 +67,11 @@ class Inventory:
         # when slots are full of mismatched items).
         return slot_ops.add(self.slots, item_id, quantity)
 
-    def add_to_slot(self, item_id: str, quantity: int, slot_index: int) -> int:
-        # add into a specific slot. no stack cap: returns leftover only for
-        # the mismatch case, which callers (handle_click) route to a swap.
-        slot = self.slots[slot_index]
-        if slot is None:
-            self.slots[slot_index] = {'item_id': item_id, 'quantity': quantity}
-            return 0
-        if slot['item_id'] != item_id:
-            return quantity
-        slot['quantity'] += quantity
-        return 0
-
-    def take_from_slot(self, slot_index: int) -> dict | None:
-        # remove and return the entire stack in `slot_index`, or None if empty.
-        slot = self.slots[slot_index]
-        self.slots[slot_index] = None
-        return slot
-
     # --- mouse drag/drop ---
 
     def handle_click(self, slot_index: int, held: dict | None) -> dict | None:
-        # returns the new mouse_held_item (or None if nothing held after the click).
-        #
-        # cases:
-        #   not holding, slot empty   -> noop, hand stays empty
-        #   not holding, slot has X   -> pick up X, slot becomes empty
-        #   holding A, slot empty     -> drop A into slot
-        #   holding A, slot has A     -> merge into slot (no cap)
-        #   holding A, slot has B     -> swap (A goes to slot, B comes to hand)
-        slot = self.slots[slot_index]
-
-        if held is None:
-            if slot is None:
-                return None
-            return self.take_from_slot(slot_index)
-
-        # empty slot OR same-item slot: same path. always consumes the
-        # entire held stack since there's no cap.
-        if slot is None or slot['item_id'] == held['item_id']:
-            self.add_to_slot(held['item_id'], held['quantity'], slot_index)
-            return None
-
-        # different item: swap
-        new_held = slot
-        self.slots[slot_index] = {'item_id': held['item_id'], 'quantity': held['quantity']}
-        return new_held
+        # pick / place / merge / swap — delegated to the shared widget.
+        return self.grid.handle_click(slot_index, held, self.slots)
 
     # --- render ---
 
@@ -129,18 +80,5 @@ class Inventory:
             return
         self.rect.topleft = self.origin
         surface.blit(self.panel_image, self.rect)
-        for i, slot in enumerate(self.slots):
-            if slot is None:
-                continue
-            proto = load_item(slot['item_id'])
-            # force the inventory size so slots stay uniform regardless of
-            # per-item icon_size overrides or the larger world-drop default.
-            img = get_item_icon(proto, size=INVENTORY_ICON_SIZE)
-            pos = self._slot_topleft(i)
-            surface.blit(img, pos)
-            if slot['quantity'] > 1:
-                label = self.font.render(format_quantity(slot['quantity']), True, (255, 255, 255))
-                label_rect = label.get_rect(
-                    bottomright=(pos[0] + img.get_width(), pos[1] + img.get_height())
-                )
-                surface.blit(label, label_rect)
+        self._sync_grid()
+        self.grid.render(surface, self.slots)

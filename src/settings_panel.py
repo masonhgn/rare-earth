@@ -11,13 +11,13 @@
 import pygame as pg
 
 from settings import DISPLAY_MODES
-from ui import NineSliceSkin, Button
+from ui import NineSliceSkin, Button, draw_button
 from ui_theme import (
     COLOR_BUTTON_BORDER, COLOR_TAB_ACTIVE_BG, COLOR_BUTTON_BG,
-    COLOR_TAB_ACTIVE_BORDER, COLOR_TEXT_BODY, COLOR_TEXT_FAINT,
+    COLOR_TAB_ACTIVE_BORDER, COLOR_TEXT_BODY,
     COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY, MODAL_HEADER_H,
     MODAL_INNER_MARGIN, PANEL_SKIN_CORNER, PANEL_SKIN_FILE,
-    PANEL_SKIN_SCALE,
+    PANEL_SKIN_SCALE, get_font,
 )
 
 
@@ -55,9 +55,9 @@ class SettingsPanel:
         self.on_quit = on_quit
         self.open = False
         self.skin = NineSliceSkin(PANEL_SKIN_FILE, PANEL_SKIN_CORNER, scale=PANEL_SKIN_SCALE)
-        self.font = pg.font.Font(None, 20)
-        self.font_big = pg.font.Font(None, 24)
-        self.font_small = pg.font.Font(None, 16)
+        self.font = get_font(20)
+        self.font_big = get_font(24)
+        self.font_small = get_font(16)
         self.origin: tuple[int, int] = (0, 0)
         self.rect = pg.Rect(0, 0, PANEL_W, PANEL_H)
         # ack tick lets the panel briefly show "saved" after a save click
@@ -131,10 +131,8 @@ class SettingsPanel:
             is_active = self.display.current_mode == mode
             color = COLOR_TAB_ACTIVE_BG if is_active else COLOR_BUTTON_BG
             border = COLOR_TAB_ACTIVE_BORDER if is_active else COLOR_BUTTON_BORDER
-            pg.draw.rect(surface, color, rect, border_radius=5)
-            pg.draw.rect(surface, border, rect, width=2, border_radius=5)
-            label = self.font.render(MODE_LABELS[mode], True, COLOR_TEXT_BODY)
-            surface.blit(label, label.get_rect(center=rect.center))
+            draw_button(surface, rect, MODE_LABELS[mode], self.font,
+                        bg=color, border=border, text_color=COLOR_TEXT_BODY)
 
         # "Save Game" caption + button
         save_section_y = section_y + 32 + MODE_BUTTON_H + 28

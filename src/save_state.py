@@ -106,31 +106,64 @@ def save_game(g, path: str = SAVE_PATH) -> None:
     os.replace(tmp, path)
 
 
+# --- per-component codecs ---------------------------------------------------
+#
+# each component type registers a (serialize, apply) pair below. serialize
+# turns the live component state into a json-safe dict; apply merges a saved
+# dict back into the freshly prototype-initialized component. adding a new
+# component type is one entry in _COMPONENT_CODECS — no new branches in the
+# (de)serialize loops.
+
+def _ser_machine(state: dict, now_ms: int) -> dict:
+    # flatten wall-clock progress to elapsed-since-start so an in-progress
+    # craft resumes from the same offset after a restart.
+    craft_elapsed_ms = 0
+    if state['current_recipe'] is not None:
+        craft_elapsed_ms = max(0, now_ms - state['started_ms'])
+    return {
+        'input_slots': state['input_slots'],
+        'output_slots': state['output_slots'],
+        'current_recipe': state['current_recipe'],
+        'craft_elapsed_ms': craft_elapsed_ms,
+    }
+
+
+def _apply_machine(target: dict, saved: dict, now_ms: int) -> None:
+    target['input_slots'] = saved['input_slots']
+    target['output_slots'] = saved['output_slots']
+    target['current_recipe'] = saved['current_recipe']
+    # rebuild started_ms relative to current ticks so crafting progress
+    # resumes from the same offset it was paused at.
+    target['started_ms'] = now_ms - saved.get('craft_elapsed_ms', 0)
+
+
+def _ser_exchange(state: dict, now_ms: int) -> dict:
+    # already pure plain data — copy the persisted keys.
+    return {
+        'drop_box': state['drop_box'],
+        'board': state['board'],
+        'active': state['active'],
+    }
+
+
+def _apply_exchange(target: dict, saved: dict, now_ms: int) -> None:
+    target['drop_box'] = saved.get('drop_box', target['drop_box'])
+    target['board'] = saved.get('board', [])
+    target['active'] = saved.get('active', [])
+
+
+_COMPONENT_CODECS = {
+    'machine': (_ser_machine, _apply_machine),
+    'exchange': (_ser_exchange, _apply_exchange),
+}
+
+
 def _serialize_components(ent, now_ms: int) -> dict:
-    # per-component serializers. machine flattens wall-clock progress
-    # to elapsed-since-start so it survives session restart; exchange
-    # is already pure plain data.
     out = {}
     for name, state in ent.components.items():
-        if name == 'machine':
-            craft_elapsed_ms = 0
-            if state['current_recipe'] is not None:
-                craft_elapsed_ms = max(0, now_ms - state['started_ms'])
-            out['machine'] = {
-                'input_slots': state['input_slots'],
-                'output_slots': state['output_slots'],
-                'current_recipe': state['current_recipe'],
-                'craft_elapsed_ms': craft_elapsed_ms,
-            }
-        elif name == 'exchange':
-            out['exchange'] = {
-                'drop_box': state['drop_box'],
-                'board': state['board'],
-                'active': state['active'],
-            }
-        else:
-            # unknown component — store as-is and hope it round-trips.
-            out[name] = state
+        codec = _COMPONENT_CODECS.get(name)
+        # unknown component — store as-is and hope it round-trips.
+        out[name] = codec[0](state, now_ms) if codec else state
     return out
 
 
@@ -234,17 +267,9 @@ def _apply_components(ent, saved_components: dict, now_ms: int) -> None:
             # save carries a component this prototype no longer defines —
             # silently drop. the prototype is the source of truth.
             continue
-        if name == 'machine':
-            target['input_slots'] = saved['input_slots']
-            target['output_slots'] = saved['output_slots']
-            target['current_recipe'] = saved['current_recipe']
-            # rebuild started_ms relative to current ticks so crafting
-            # progress resumes from the same offset it was paused at.
-            target['started_ms'] = now_ms - saved.get('craft_elapsed_ms', 0)
-        elif name == 'exchange':
-            target['drop_box'] = saved.get('drop_box', target['drop_box'])
-            target['board'] = saved.get('board', [])
-            target['active'] = saved.get('active', [])
+        codec = _COMPONENT_CODECS.get(name)
+        if codec:
+            codec[1](target, saved, now_ms)
         else:
             target.update(saved)
 

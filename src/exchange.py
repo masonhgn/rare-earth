@@ -17,10 +17,10 @@ from contracts import accept_contract, cancel_contract
 from item import format_quantity, get_item_icon, load_item
 from ui import NineSliceSkin, TabStrip, Button, ScrollList, SlotGrid
 from ui_theme import (
-    COLOR_ACCENT_GOLD, COLOR_ROW_STRIPE, COLOR_TEXT_BODY, COLOR_TEXT_FAINT,
-    COLOR_TEXT_GHOSTED, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
+    COLOR_ACCENT_GOLD, COLOR_ROW_STRIPE, COLOR_TEXT_FAINT,
+    COLOR_TEXT_GHOSTED, COLOR_TEXT_PRIMARY,
     MODAL_HEADER_H, MODAL_INNER_MARGIN, MODAL_TAB_GAP, MODAL_TAB_H,
-    PANEL_SKIN_CORNER, PANEL_SKIN_FILE, PANEL_SKIN_SCALE,
+    PANEL_SKIN_CORNER, PANEL_SKIN_FILE, PANEL_SKIN_SCALE, get_font,
 )
 import slots as slot_ops
 
@@ -82,9 +82,9 @@ class ExchangePanel:
         self.skin = NineSliceSkin(PANEL_SKIN_FILE, PANEL_SKIN_CORNER, scale=PANEL_SKIN_SCALE)
         # smaller fonts than the first pass — the overlay was crowding
         # the border art on a 1280x720 viewport.
-        self.font = pg.font.Font(None, 20)
-        self.font_small = pg.font.Font(None, 16)
-        self.font_big = pg.font.Font(None, 24)
+        self.font = get_font(20)
+        self.font_small = get_font(16)
+        self.font_big = get_font(24)
         self.origin: tuple[int, int] = (0, 0)
         self.rect = pg.Rect(0, 0, PANEL_W, PANEL_H)
         self.tabs: TabStrip | None = None
@@ -197,10 +197,6 @@ class ExchangePanel:
         x, y = self.origin
         title = self.font_big.render('Exchange', True, COLOR_TEXT_PRIMARY)
         surface.blit(title, (x + INNER_MARGIN, y + INNER_MARGIN + 2))
-
-    def _render_placeholder_text(self, surface: pg.Surface, rect: pg.Rect, text: str) -> None:
-        label = self.font_small.render(text, True, COLOR_TEXT_FAINT)
-        surface.blit(label, label.get_rect(center=rect.center))
 
     # --- spot tab ---
 

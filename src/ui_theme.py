@@ -9,6 +9,14 @@
 # rather than appearance (cream, brown) so a palette swap is a one-line
 # change in this module instead of a project-wide search.
 
+import pygame as pg
+
+
+def get_font(size: int) -> pg.font.Font:
+    # single place the ui builds fonts, so swapping the default family for
+    # a bundled TTF later is one edit here instead of a per-file search.
+    return pg.font.Font(None, size)
+
 
 # 9-slice panel art used by every modal. scale=0.5 in NineSliceSkin gets
 # the rails to a non-bulky thickness on a 1280x720 viewport.
@@ -54,8 +62,18 @@ COLOR_TAB_INACTIVE_TEXT = (200, 190, 175)
 
 COLOR_SLOT_BG = (60, 45, 30)
 COLOR_SLOT_BORDER = (32, 22, 16)
+COLOR_SLOT_QTY_TEXT = (255, 255, 255)  # stack-size badge on slots / cursor
 
 COLOR_SCROLLBAR_TRACK = (50, 40, 30)
 COLOR_SCROLLBAR_THUMB = (140, 110, 75)
 
 COLOR_ROW_STRIPE = (0, 0, 0, 30)       # subtle dark tint on alternating rows
+
+
+# --- widget corner radii (px) ---
+# named by role so the rounded-rect look stays consistent and a restyle
+# is a one-line change here.
+RADIUS_TAB = 6
+RADIUS_BUTTON = 5
+RADIUS_SLOT = 4
+RADIUS_SCROLLBAR = 3

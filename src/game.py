@@ -1,24 +1,22 @@
 
-# main game class. orchestrates world update, render order, input.
+# main game class. owns the subsystems, wires them together, and runs the
+# update/render loop. the heavy lifting is delegated out:
+#   - world layer queueing + break visuals -> WorldRenderer (render.py)
+#   - screen-space overlays (hud, minimap, tooltip, held item) -> HudOverlay (hud.py)
+#   - player path-follow / facing / bounds / collision -> movement.py
+#   - break / drag-mining state machine -> BreakSystem (breaking.py)
 #
-# render order each frame (delegated to renderer.flush at the end):
-#   terrain -> overlay -> shadow -> dropped -> entity -> player -> highlight
-#   then on top (screen-space, drawn directly): hud -> minimap -> inventory -> held item
-#
-# the break / drag-mining state machine lives in BreakSystem (breaking.py).
-# Game keeps the render queueing helpers since they reach into many
-# subsystems' state.
-
-import math
+# render order each frame: WorldRenderer.flush() queues + flushes the world
+# layers (terrain -> overlay -> shadow -> dropped -> entity -> player ->
+# highlight), then the screen-space ui is drawn directly on top.
 
 import pygame as pg
 
-from config import TILE_LENGTH, TITLE, DROPPED_ITEM_SIZE
+from config import TILE_LENGTH, TITLE
 from world import World
-from render import Screen, LAYERS, Minimap
+from render import Screen, Minimap, WorldRenderer
 from inventory import Inventory
-from hud import Hud
-from item import load_item, format_quantity, get_item_icon
+from hud import Hud, HudOverlay
 from settings import load_settings, save_settings
 from breaking import BreakSystem
 from factory import FactorySystem, FactoryPanel
@@ -29,12 +27,9 @@ from display import DisplayService
 from spot_market import SpotMarket
 from contracts import ContractSystem, initial_board
 from clock import DayClock
-from save_state import save_game, load_game, save_exists
+from save_state import save_game, load_game
+import movement
 import input_handler
-
-
-# how long the yellow click marker stays visible (fades to 0 over this span)
-CLICK_MARKER_MS = 500
 
 
 class Game:
@@ -57,6 +52,8 @@ class Game:
         self.hud.visible = self.settings.get('show_hud', True)
         # break state, drag-mining mode, particle effects all live here.
         self.break_system = BreakSystem(self.world, self.screen.camera, self.minimap)
+        # queues the world layers + break visuals onto the renderer each frame.
+        self.world_renderer = WorldRenderer(self.screen, self.world, self.break_system)
         # factory system + modal panel ui for machine entities.
         self.factory_system = FactorySystem(self.world)
         self.factory_panel = FactoryPanel()
@@ -89,13 +86,16 @@ class Game:
             ('inventory', 'src/data/sprites/ui/tabs/backpack.png', self.inventory.toggle),
             ('settings', 'src/data/sprites/ui/tabs/settings.png', self._toggle_settings),
         ])
+        # screen-space overlays (diagnostics, day counter, minimap, hover
+        # tooltip, held item) — reads display state off this Game.
+        self.hud_overlay = HudOverlay(self)
 
         # ui state
         self.held_item: dict | None = None
         self.hover_pos: tuple[int, int] = (0, 0)
 
-        # click marker: yellow X drawn at the click world pos, fading over
-        # CLICK_MARKER_MS. None when no recent click.
+        # click marker: yellow X drawn at the click world pos, fading out
+        # over a short window (handled by WorldRenderer). None when idle.
         self.click_marker: tuple[tuple[float, float], int] | None = None
 
         # at most one pending click-to-walk action is queued at a time.
@@ -206,96 +206,6 @@ class Game:
             self.world.spawn_dropped_item(self.held_item['item_id'], leftover, (cx, cy))
         self.held_item = None
 
-    def _player_collides_with_solid(self) -> bool:
-        # is the player's hitbox overlapping any solid entity's footprint?
-        # cheap n² scan over self.world.entities — fine until we have many
-        # solids on screen; switch to a spatial index then.
-        hb = self.world.get_player().hitbox_rect()
-        for entity in self.world.entities.values():
-            if entity.prototype.solid and hb.colliderect(entity.collision_rect()):
-                return True
-        return False
-
-    def _follow_path(self, player) -> tuple[float, float]:
-        # walk along the path at the player's speed. consumes as much of
-        # this frame's step as possible — if the player arrives at a
-        # waypoint with leftover step, the loop continues to the next
-        # waypoint in the same frame (so animation never sees a 0-vector
-        # mid-walk just because a waypoint flipped). returns the total
-        # (dx, dy) actually applied, used by _update_player_animation.
-        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        speed = player.prototype.speed or 0.0
-        step_remaining = speed * self.dt
-        total_dx = total_dy = 0.0
-        while player.path and step_remaining > 0:
-            wp_tx, wp_ty = player.path[0]
-            target_x = wp_tx * TILE_LENGTH + TILE_LENGTH / 2
-            target_y = wp_ty * TILE_LENGTH + TILE_LENGTH / 2
-            center_x = player.world_x + sprite_w / 2
-            center_y = player.world_y + sprite_h / 2
-            dx = target_x - center_x
-            dy = target_y - center_y
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist < 4:
-                player.path.pop(0)
-                continue
-            if step_remaining >= dist:
-                # cover the rest of the leg this frame; pop and keep going.
-                player.world_x += dx
-                player.world_y += dy
-                total_dx += dx
-                total_dy += dy
-                step_remaining -= dist
-                player.path.pop(0)
-            else:
-                # partial step toward the waypoint.
-                nx = dx / dist
-                ny = dy / dist
-                player.world_x += nx * step_remaining
-                player.world_y += ny * step_remaining
-                total_dx += nx * step_remaining
-                total_dy += ny * step_remaining
-                step_remaining = 0
-        return total_dx, total_dy
-
-    def _update_player_animation(self, player, dx: float, dy: float) -> None:
-        # single canonical animation update, run after movement is resolved.
-        # facing follows the dominant axis; ties (|dx| == |dy|, i.e. diagonal
-        # movement) go to horizontal — preserves the previous left/right
-        # preference and avoids flicker when the path follower bounces
-        # between near-equal components.
-        if player.anim is None:
-            return
-        if dx == 0 and dy == 0:
-            player.anim.set_state('idle')
-            return
-        # 0.5 threshold avoids flipping facing for sub-pixel rounding noise.
-        if abs(dx) >= abs(dy):
-            if dx > 0.5:
-                player.anim.set_state('walking_right')
-            elif dx < -0.5:
-                player.anim.set_state('walking_left')
-        else:
-            if dy > 0.5:
-                player.anim.set_state('walking_down')
-            elif dy < -0.5:
-                player.anim.set_state('walking_up')
-
-    def _clamp_player_to_bounds(self) -> None:
-        # keep the player's *hitbox* inside the map rectangle. clamping the
-        # full 128x128 sprite frame would stop the player ~40px before the
-        # visible body actually reaches the edge, since most of the frame is
-        # transparent padding. hitbox math matches Entity.hitbox_rect().
-        player = self.world.get_player()
-        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        hitbox_w, hitbox_h = player.prototype.hitbox or (sprite_w, sprite_h)
-        hx_off = (sprite_w - hitbox_w) / 2
-        hy_off = sprite_h - hitbox_h
-        map_w = self.world.width * TILE_LENGTH
-        map_h = self.world.height * TILE_LENGTH
-        player.world_x = max(-hx_off, min(player.world_x, map_w - hx_off - hitbox_w))
-        player.world_y = max(-hy_off, min(player.world_y, map_h - hy_off - hitbox_h))
-
     def _position_inventory(self) -> None:
         # bottom-left corner with a small margin. (top-left would collide
         # with the HUD overlay.) keep rect in sync with origin so
@@ -376,23 +286,23 @@ class Game:
             # walls instead of sticking. each axis reverts on collision.
             if dx:
                 player.world_x += dx
-                if self._player_collides_with_solid():
+                if movement.player_collides_with_solid(self.world):
                     player.world_x -= dx
                 else:
                     moved_dx = dx
             if dy:
                 player.world_y += dy
-                if self._player_collides_with_solid():
+                if movement.player_collides_with_solid(self.world):
                     player.world_y -= dy
                 else:
                     moved_dy = dy
-            self._clamp_player_to_bounds()
+            movement.clamp_player_to_bounds(self.world)
         elif player.path:
-            moved_dx, moved_dy = self._follow_path(player)
+            moved_dx, moved_dy = movement.follow_path(player, self.world, self.dt)
 
         # one canonical place to update the player's facing/animation state,
         # using the *actual* movement vector applied this frame.
-        self._update_player_animation(player, moved_dx, moved_dy)
+        movement.update_player_animation(player, moved_dx, moved_dy)
 
         # pending click-to-walk action (break or open). fires the moment
         # the player is within range; both kinds clear the path so the
@@ -439,256 +349,14 @@ class Game:
         cam = self.screen.camera
         culling = self.screen.culling
 
-        self._queue_terrain(cam, culling)
-        self._queue_overlay(cam, culling)
-        self._queue_entities(cam, culling)
-        self._queue_dropped(cam, culling)
-        self._queue_click_marker(cam)
-        self.break_system.queue_progress_bar(self.screen.renderer, cam)
-        self.break_system.queue_particles(self.screen.renderer, cam, culling)
+        # world layers + break visuals, queued and flushed in LAYERS order.
+        self.click_marker = self.world_renderer.flush(cam, culling, self.click_marker)
 
-        self.screen.renderer.flush(LAYERS)
-
-        # screen-space ui drawn directly on the display surface, on top of everything
-        self._draw_hud()
-        self._draw_minimap()
+        # screen-space ui drawn directly on top of the flushed world.
+        self.hud_overlay.render_base()
         self.inventory.render(self.screen.surface)
         self.hud_tabs.render(self.screen.surface)
         self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
-        self._draw_hover_tooltip()
-        self._draw_held_item()
-
-    def _queue_terrain(self, cam, culling) -> None:
-        world = self.world
-        sprites = self.screen.sprites
-        tx0, ty0, tx1, ty1 = culling.tile_range(cam.offset, world.width, world.height)
-        for ty in range(ty0, ty1):
-            row = world.map_grid[ty]
-            for tx in range(tx0, tx1):
-                img = sprites.get(row[tx])
-                if img is None:
-                    continue
-                sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
-                self.screen.renderer.queue('terrain', img, (sx, sy))
-
-    def _queue_overlay(self, cam, culling) -> None:
-        # sparse layer (most cells are None). ore tiles use alpha so the
-        # terrain underneath shows through between chunks. break visuals
-        # (jitter + flash) come from break_system, which returns zeros for
-        # any tile that isn't the current target.
-        world = self.world
-        sprites = self.screen.sprites
-        tx0, ty0, tx1, ty1 = culling.tile_range(cam.offset, world.width, world.height)
-        now_ms = pg.time.get_ticks()
-
-        for ty in range(ty0, ty1):
-            row = world.overlay_grid[ty]
-            for tx in range(tx0, tx1):
-                tile_id = row[tx]
-                if tile_id is None:
-                    continue
-                img = sprites.get(tile_id)
-                if img is None:
-                    continue
-                jx, jy, flash_alpha = self.break_system.visuals_for_overlay_tile((tx, ty), now_ms)
-                sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
-                self.screen.renderer.queue('overlay', img, (sx + jx, sy + jy))
-                if flash_alpha > 0:
-                    self._queue_flash('overlay', img.get_size(), (sx + jx, sy + jy), flash_alpha)
-
-    def _queue_entities(self, cam, culling) -> None:
-        player = self.world.get_player()
-        now_ms = pg.time.get_ticks()
-        sprites = self.screen.sprites
-        animations = self.screen.animations
-
-        # split placed entities (non-player) for crude y-sort, then player last
-        placed = [e for e in self.world.entities.values() if e is not player]
-        placed.sort(key=lambda e: e.world_y)
-        for entity in placed:
-            self._queue_one_entity(entity, cam, culling, sprites, animations, now_ms, layer='entity')
-        self._queue_one_entity(player, cam, culling, sprites, animations, now_ms, layer='player')
-
-    def _queue_one_entity(self, entity, cam, culling, sprites, animations, now_ms, *, layer: str) -> None:
-        proto = entity.prototype
-        ox, oy = proto.render_offset or (0, 0)
-        jx, jy, flash_alpha = self.break_system.visuals_for_entity(entity.id, now_ms)
-
-        if entity.anim is not None:
-            frame = entity.anim.advance(animations, now_ms)
-            size = proto.sprite_size or frame.get_size()
-            if not culling.point_visible((entity.world_x + ox, entity.world_y + oy), cam.offset, size=size):
-                return
-            sx, sy = cam.world_to_screen((entity.world_x + ox, entity.world_y + oy))
-            if proto.shadow:
-                self._queue_shadow(frame, (sx, sy))
-            self.screen.renderer.queue(layer, frame, (sx + jx, sy + jy))
-            if flash_alpha > 0:
-                self._queue_flash(layer, frame.get_size(), (sx + jx, sy + jy), flash_alpha)
-            return
-
-        # composed from sprite cells per row/col in the prototype grid.
-        # culling + flash use the actual image size so oversized file sprites
-        # (e.g. a 128x128 tree in a 1x1 grid) aren't cut off and their break
-        # flash covers the whole sprite, not just a 64x64 corner.
-        for r, row in enumerate(proto.grid):
-            for c, sprite_id in enumerate(row):
-                img = sprites.get(sprite_id)
-                if img is None:
-                    continue
-                iw, ih = img.get_size()
-                wx = entity.world_x + c * TILE_LENGTH + ox
-                wy = entity.world_y + r * TILE_LENGTH + oy
-                if not culling.point_visible((wx, wy), cam.offset, size=(iw, ih)):
-                    continue
-                sx, sy = cam.world_to_screen((wx, wy))
-                self.screen.renderer.queue(layer, img, (sx + jx, sy + jy))
-                if flash_alpha > 0:
-                    self._queue_flash(layer, (iw, ih), (sx + jx, sy + jy), flash_alpha)
-
-    def _queue_flash(self, layer: str, size: tuple[int, int], screen_pos: tuple[float, float], alpha: int) -> None:
-        # semi-transparent white blit on top of the sprite. acts like an
-        # additive flash because the underlying sprite shows through where
-        # alpha < 255.
-        overlay = pg.Surface(size, pg.SRCALPHA)
-        overlay.fill((255, 255, 255, alpha))
-        self.screen.renderer.queue(layer, overlay, screen_pos)
-
-    def _queue_shadow(self, image, screen_pos: tuple[float, float]) -> None:
-        # chud-style: a darkened, scaled-down silhouette of the current frame
-        # blitted just below the entity. BLEND_RGBA_MULT preserves the sprite's
-        # alpha shape (so the shadow follows the character outline, not a
-        # rectangle) while crushing rgb to black.
-        sw, sh = image.get_size()
-        shadow_w, shadow_h = int(sw * 0.78), int(sh * 0.45)
-        shadow = pg.transform.smoothscale(image, (shadow_w, shadow_h))
-        shadow.fill((0, 0, 0, 130), None, pg.BLEND_RGBA_MULT)
-        sx, sy = screen_pos
-        x_off = (sw - shadow_w) // 2
-        y_off = sh - shadow_h - 4
-        self.screen.renderer.queue('shadow', shadow, (sx + x_off, sy + y_off))
-
-    def _queue_dropped(self, cam, culling) -> None:
-        # bounce wave so loose items feel alive
-        now_ms = pg.time.get_ticks()
-        amplitude = 4
-        for drop in self.world.dropped:
-            if not culling.point_visible(drop.world_pos, cam.offset, size=(DROPPED_ITEM_SIZE, DROPPED_ITEM_SIZE)):
-                continue
-            proto = load_item(drop.item_id)
-            img = get_item_icon(proto)
-            # crude bounce per item phase-shifted by world pos to desync
-            phase = (drop.world_x + drop.world_y) * 0.01
-            offset_y = amplitude * math.sin(now_ms / 1000.0 * math.pi + phase)
-            sx, sy = cam.world_to_screen(drop.world_pos)
-            self.screen.renderer.queue('dropped', img, (sx, sy + offset_y))
-
-    def _queue_click_marker(self, cam) -> None:
-        # yellow X at the click point, fading over CLICK_MARKER_MS.
-        if self.click_marker is None:
-            return
-        (wx, wy), born_ms = self.click_marker
-        now_ms = pg.time.get_ticks()
-        age = now_ms - born_ms
-        if age >= CLICK_MARKER_MS:
-            self.click_marker = None
-            return
-        alpha = int(255 * (1 - age / CLICK_MARKER_MS))
-        sx, sy = cam.world_to_screen((wx, wy))
-        size = 8
-        # draw on a small SRCALPHA surface so we can apply alpha
-        surf = pg.Surface((size * 2 + 4, size * 2 + 4), pg.SRCALPHA)
-        color = (255, 220, 80, alpha)
-        pg.draw.line(surf, color, (2, 2), (size * 2 + 2, size * 2 + 2), 2)
-        pg.draw.line(surf, color, (size * 2 + 2, 2), (2, size * 2 + 2), 2)
-        self.screen.renderer.queue('highlight', surf, (sx - size - 2, sy - size - 2))
-
-# --- hud / held item drawn directly on display (screen-space) ---
-
-    def _draw_hud(self) -> None:
-        # clock.get_fps() is smoothed over the last 10 frames
-        self.hud.render(
-            self.screen.surface,
-            fps=self.clock.get_fps(),
-            frame_ms=self.dt * 1000,
-            n_entities=len(self.world.entities),
-            n_dropped=len(self.world.dropped),
-        )
-        # day counter is always visible regardless of F3 toggle
-        self.hud.render_day_counter(self.screen.surface, day=self.day_clock.day)
-
-    def _draw_minimap(self) -> None:
-        player = self.world.get_player()
-        # use the player's visual center, not the sprite top-left, so the
-        # marker tracks where the character actually is.
-        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        center = (player.world_x + sw / 2, player.world_y + sh / 2)
-        self.minimap.render(
-            self.screen.surface,
-            (self.screen.width, self.screen.height),
-            self.screen.camera.offset,
-            center,
-        )
-
-    def _hovered_item_proto(self):
-        # find the item under the cursor across inventory, factory panel, and
-        # world drops (in priority order). returns ItemPrototype or None.
-        # held items don't get a tooltip — the cursor already shows the icon.
-        if self.held_item is not None:
-            return None
-        mx, my = self.hover_pos
-
-        # 1. factory panel slot
-        if self.factory_panel.open and self.factory_panel.entity is not None:
-            info = self.factory_panel.slot_at_pixel((mx, my))
-            if info is not None:
-                kind, idx = info
-                ms = self.factory_panel.entity.machine_state
-                slots = ms['input_slots'] if kind == 'input' else ms['output_slots']
-                if slots[idx] is not None:
-                    return load_item(slots[idx]['item_id'])
-
-        # 2. inventory slot
-        if self.inventory.open:
-            slot_idx = self.inventory.slot_at_pixel((mx, my))
-            if slot_idx is not None and self.inventory.slots[slot_idx] is not None:
-                return load_item(self.inventory.slots[slot_idx]['item_id'])
-
-        # 3. world drop under cursor
-        wx, wy = self.screen.camera.screen_to_world((mx, my))
-        for drop in self.world.dropped:
-            if (drop.world_x <= wx < drop.world_x + DROPPED_ITEM_SIZE
-                    and drop.world_y <= wy < drop.world_y + DROPPED_ITEM_SIZE):
-                return load_item(drop.item_id)
-        return None
-
-    def _draw_hover_tooltip(self) -> None:
-        proto = self._hovered_item_proto()
-        if proto is None:
-            return
-        label = self.hud.font.render(proto.name, True, (245, 235, 200))
-        # bottom-right corner with a subtle dark padded background
-        margin = 14
-        pad_x, pad_y = 10, 5
-        rect = label.get_rect()
-        rect.bottomright = (self.screen.width - margin, self.screen.height - margin)
-        bg = pg.Surface((rect.w + pad_x * 2, rect.h + pad_y * 2), pg.SRCALPHA)
-        bg.fill((0, 0, 0, 180))
-        self.screen.surface.blit(bg, (rect.x - pad_x, rect.y - pad_y))
-        self.screen.surface.blit(label, rect)
-
-    def _draw_held_item(self) -> None:
-        if self.held_item is None:
-            return
-        proto = load_item(self.held_item['item_id'])
-        img = get_item_icon(proto)
-        pos = self.held_item['screen_pos']
-        self.screen.surface.blit(img, pos)
-        if self.held_item['quantity'] > 1:
-            label = self.inventory.font.render(
-                format_quantity(self.held_item['quantity']), True, (255, 255, 255),
-            )
-            label_rect = label.get_rect(bottomright=(pos[0] + img.get_width(), pos[1] + img.get_height()))
-            self.screen.surface.blit(label, label_rect)
+        self.hud_overlay.render_cursor()
