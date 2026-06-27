@@ -30,6 +30,21 @@ SPOT_TICK_SEC = 5.0
 # step magnitudes the walk picks from each tick.
 STEP_CHOICES = (-2, -1, 0, 1, 2)
 
+# bid/ask spread. the stored price is the mid; the player buys above it
+# and sells below it. half_spread = max(1, round(mid * SPREAD_FRACTION)),
+# so even a 2-coin item has a real 1-coin-each-way cost. the spread is
+# what makes spot churn lossy and keeps forward contracts (priced at mid
+# plus their own margin) worth using.
+SPREAD_FRACTION = 0.06
+
+# how many price points the per-item history keeps for the sparkline. at
+# one point per SPOT_TICK_SEC, 64 points is ~5 minutes of recent action.
+HISTORY_LEN = 64
+
+
+def _half_spread(mid: int) -> int:
+    return max(1, round(mid * SPREAD_FRACTION))
+
 
 def _drift_weights(diff: int) -> list[float]:
     # diff > 0  -> current is below target, bias positive steps
@@ -65,8 +80,19 @@ class SpotMarket:
         self.targets = _discover_tradeable()
         # starting price = target for every tradeable item.
         self.prices: dict[str, int] = dict(self.targets)
+        # per-item recent price points for the spot-tab sparkline. seeded
+        # with the current price so a fresh market draws a flat line rather
+        # than nothing. not persisted — it repopulates one point per tick.
+        self.history: dict[str, list[int]] = {}
+        self.seed_history()
         # seconds accumulated since the last walk step.
         self._tick_clock = 0.0
+
+    def seed_history(self) -> None:
+        # reset each item's history to a single point at its current price.
+        # called on construction and again after a save load (which rewrites
+        # prices), so the sparkline starts from the restored value.
+        self.history = {item_id: [price] for item_id, price in self.prices.items()}
 
     def tick(self, dt: float) -> None:
         # while-loop instead of single-fire so a large dt (e.g. resuming
@@ -83,9 +109,27 @@ class SpotMarket:
             weights = _drift_weights(diff)
             step = random.choices(STEP_CHOICES, weights=weights)[0]
             self.prices[item_id] = max(0, current + step)
+            hist = self.history.setdefault(item_id, [])
+            hist.append(self.prices[item_id])
+            if len(hist) > HISTORY_LEN:
+                del hist[:-HISTORY_LEN]
 
     def price(self, item_id: str) -> int | None:
+        # mid price. forward contracts size off this; spot trades use the
+        # spread-adjusted buy_price / sell_price below.
         return self.prices.get(item_id)
+
+    def buy_price(self, item_id: str) -> int | None:
+        mid = self.price(item_id)
+        if mid is None:
+            return None
+        return mid + _half_spread(mid)
+
+    def sell_price(self, item_id: str) -> int | None:
+        mid = self.price(item_id)
+        if mid is None:
+            return None
+        return max(0, mid - _half_spread(mid))
 
     # --- trade actions ---
     #
@@ -94,7 +138,9 @@ class SpotMarket:
     # doesn't have to reason about coin accounting or inventory capacity.
 
     def sell(self, inventory, item_id: str, qty: int = 1) -> bool:
-        price = self.price(item_id)
+        if qty <= 0:
+            return False
+        price = self.sell_price(item_id)
         if price is None:
             return False
         if not slot_ops.take(inventory.slots, item_id, qty):
@@ -103,7 +149,9 @@ class SpotMarket:
         return True
 
     def buy(self, inventory, item_id: str, qty: int = 1) -> bool:
-        price = self.price(item_id)
+        if qty <= 0:
+            return False
+        price = self.buy_price(item_id)
         if price is None:
             return False
         total = price * qty
@@ -114,6 +162,24 @@ class SpotMarket:
         slot_ops.spend_coin(inventory, total)
         inventory.add_item(item_id, qty)
         return True
+
+    # --- trade sizing for the qty selector (x1/x10/x100/all) ---
+
+    def max_sell_qty(self, inventory, item_id: str) -> int:
+        # capped by how many units the player actually holds.
+        if self.sell_price(item_id) is None:
+            return 0
+        return slot_ops.count(inventory.slots, item_id)
+
+    def max_buy_qty(self, inventory, item_id: str) -> int:
+        # capped by coin affordability at the buy (ask) price. a 0/None
+        # price or a full mismatched inventory yields 0.
+        price = self.buy_price(item_id)
+        if not price:
+            return 0
+        if not slot_ops.can_add(inventory.slots, item_id):
+            return 0
+        return slot_ops.coin_count(inventory) // price
 
     def tradeable_ids(self) -> list[str]:
         # stable order so the spot tab list doesn't shuffle each frame.

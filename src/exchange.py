@@ -15,10 +15,13 @@ import pygame as pg
 
 from contracts import accept_contract, cancel_contract
 from item import format_quantity, get_item_icon, load_item
-from ui import NineSliceSkin, TabStrip, Button, ScrollList, SlotGrid
+from ui import NineSliceSkin, TabStrip, Button, ScrollList, SlotGrid, draw_button
 from ui_theme import (
-    COLOR_ACCENT_GOLD, COLOR_ROW_STRIPE, COLOR_TEXT_FAINT,
-    COLOR_TEXT_GHOSTED, COLOR_TEXT_PRIMARY,
+    COLOR_ACCENT_GOLD, COLOR_ACCENT_GOLD_DIM, COLOR_ROW_STRIPE,
+    COLOR_SPARK_BG, COLOR_SPARK_DOWN, COLOR_SPARK_UP,
+    COLOR_TAB_ACTIVE_BG, COLOR_TAB_ACTIVE_BORDER, COLOR_TAB_INACTIVE_BG,
+    COLOR_TAB_INACTIVE_BORDER, COLOR_TAB_INACTIVE_TEXT, COLOR_TEXT_FAINT,
+    COLOR_TEXT_GHOSTED, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
     MODAL_HEADER_H, MODAL_INNER_MARGIN, MODAL_TAB_GAP, MODAL_TAB_H,
     PANEL_SKIN_CORNER, PANEL_SKIN_FILE, PANEL_SKIN_SCALE, get_font,
 )
@@ -43,6 +46,25 @@ SPOT_BUTTON_GAP = 8
 # canonical value lives on ScrollList so widgets that don't know about
 # exchange layout still get the same number.
 SPOT_RIGHT_PAD = ScrollList.SCROLLBAR_PAD
+
+# in-row column anchors (offsets from the row's left edge). icon, then
+# name, then the price-history sparkline, then the buy/sell price block.
+# the buy/sell buttons are right-anchored separately via _spot_button_rects.
+SPOT_NAME_X = 60
+SPOT_SPARK_X = 220
+SPOT_SPARK_W = 120
+SPOT_SPARK_H = 32
+SPOT_PRICE_X = 360
+
+# trade-quantity selector sitting above the spot list. 'all' means
+# sell-everything / buy-as-many-as-affordable; the ints are fixed sizes.
+SPOT_QTY_MODES = (1, 10, 100, 'all')
+SPOT_QTY_LABELS = ('x1', 'x10', 'x100', 'All')
+SPOT_QTY_SELECTOR_H = 30
+SPOT_QTY_SELECTOR_GAP = 8   # gap between the selector and the list below
+SPOT_QTY_SEG_W = 64
+SPOT_QTY_SEG_GAP = 6
+SPOT_QTY_LABEL_W = 50       # room for the "Qty:" caption left of the segments
 
 # drop box tab grid geometry. 6x5 = 30 slots, matching the exchange
 # entity's drop_box_slots. tweak in tandem with the entity json.
@@ -92,6 +114,9 @@ class ExchangePanel:
         # the panel's current origin; constructed once so scroll offset
         # persists across renders.
         self.spot_list = ScrollList(pg.Rect(0, 0, 0, 0), SPOT_ROW_H)
+        # active trade size for the spot tab. one of SPOT_QTY_MODES; drives
+        # how many units each Buy/Sell button moves per click.
+        self.spot_qty_mode = 1
         # drop box slot grid. rect set per-render once we know the
         # content area, same as spot_list.
         self.drop_grid = SlotGrid(
@@ -201,14 +226,45 @@ class ExchangePanel:
     # --- spot tab ---
 
     def _render_spot(self, surface: pg.Surface, rect: pg.Rect) -> None:
-        self.spot_list.rect = rect
+        # carve a fixed strip at the top for the quantity selector, give the
+        # scrollable list the remainder. the list rect is what scroll + click
+        # hit-tests read off self.spot_list.rect, so they stay in sync.
+        self._render_qty_selector(surface, rect)
+        list_y = rect.y + SPOT_QTY_SELECTOR_H + SPOT_QTY_SELECTOR_GAP
+        self.spot_list.rect = pg.Rect(rect.x, list_y, rect.width, rect.bottom - list_y)
         ids = self.spot_market.tradeable_ids()
         self.spot_list.render(surface, len(ids), lambda s, i, r: self._render_spot_row(s, i, r, ids))
+
+    def _qty_seg_rects(self, content_rect: pg.Rect) -> list[pg.Rect]:
+        # one rect per SPOT_QTY_MODES segment, laid out left-to-right after
+        # the "Qty:" caption. shared by render + click so hit-tests match.
+        x0 = content_rect.x + SPOT_QTY_LABEL_W
+        y = content_rect.y
+        pitch = SPOT_QTY_SEG_W + SPOT_QTY_SEG_GAP
+        return [
+            pg.Rect(x0 + i * pitch, y, SPOT_QTY_SEG_W, SPOT_QTY_SELECTOR_H)
+            for i in range(len(SPOT_QTY_MODES))
+        ]
+
+    def _render_qty_selector(self, surface: pg.Surface, content_rect: pg.Rect) -> None:
+        caption = self.font.render('Qty:', True, COLOR_TEXT_MUTED)
+        surface.blit(caption, caption.get_rect(
+            left=content_rect.x, centery=content_rect.y + SPOT_QTY_SELECTOR_H // 2,
+        ))
+        for seg, mode, label in zip(
+                self._qty_seg_rects(content_rect), SPOT_QTY_MODES, SPOT_QTY_LABELS):
+            active = self.spot_qty_mode == mode
+            bg = COLOR_TAB_ACTIVE_BG if active else COLOR_TAB_INACTIVE_BG
+            border = COLOR_TAB_ACTIVE_BORDER if active else COLOR_TAB_INACTIVE_BORDER
+            text_color = COLOR_TEXT_PRIMARY if active else COLOR_TAB_INACTIVE_TEXT
+            draw_button(surface, seg, label, self.font,
+                        bg=bg, border=border, text_color=text_color)
 
     def _render_spot_row(self, surface: pg.Surface, idx: int, row_rect: pg.Rect, ids: list[str]) -> None:
         item_id = ids[idx]
         proto = load_item(item_id)
-        price = self.spot_market.price(item_id)
+        buy_p = self.spot_market.buy_price(item_id)
+        sell_p = self.spot_market.sell_price(item_id)
 
         # subtle row striping for legibility
         if idx % 2 == 1:
@@ -223,23 +279,62 @@ class ExchangePanel:
 
         # name
         name_label = self.font.render(proto.name, True, COLOR_TEXT_PRIMARY)
-        name_rect = name_label.get_rect(left=row_rect.x + 64, centery=row_rect.centery)
+        name_rect = name_label.get_rect(left=row_rect.x + SPOT_NAME_X, centery=row_rect.centery)
         surface.blit(name_label, name_rect)
 
-        # price (right-of-name, left of the buttons)
-        price_label = self.font.render(f'{price} c', True, COLOR_ACCENT_GOLD)
-        price_rect = price_label.get_rect(left=row_rect.x + 320, centery=row_rect.centery)
-        surface.blit(price_label, price_rect)
+        # price-history sparkline
+        spark_rect = pg.Rect(
+            row_rect.x + SPOT_SPARK_X, row_rect.centery - SPOT_SPARK_H // 2,
+            SPOT_SPARK_W, SPOT_SPARK_H,
+        )
+        self._draw_sparkline(surface, spark_rect, self.spot_market.history.get(item_id, []))
 
-        # action buttons. enabled state reflects whether the trade is
-        # currently legal — buy needs coin + an open stack, sell needs
-        # at least one unit in inventory.
+        # buy/sell price block (spread): ask above, bid below.
+        buy_label = self.font_small.render(f'buy {buy_p}', True, COLOR_ACCENT_GOLD)
+        sell_label = self.font_small.render(f'sell {sell_p}', True, COLOR_ACCENT_GOLD_DIM)
+        surface.blit(buy_label, buy_label.get_rect(left=row_rect.x + SPOT_PRICE_X, bottom=row_rect.centery - 1))
+        surface.blit(sell_label, sell_label.get_rect(left=row_rect.x + SPOT_PRICE_X, top=row_rect.centery + 1))
+
+        # action buttons. the label carries the quantity that would actually
+        # trade given the current qty mode (0 -> disabled, shown as bare verb).
         sell_rect, buy_rect = self._spot_button_rects(row_rect)
-        coin = self._coin_count()
-        can_buy = price is not None and coin >= price and self._can_add_to_inventory(item_id)
-        can_sell = self._inventory_count(item_id) >= 1
-        Button(sell_rect, 'Sell 1', self.font, enabled=can_sell).render(surface)
-        Button(buy_rect, 'Buy 1', self.font, enabled=can_buy).render(surface)
+        sell_qty = self._spot_trade_qty(item_id, 'sell')
+        buy_qty = self._spot_trade_qty(item_id, 'buy')
+        Button(sell_rect, f'Sell {sell_qty}' if sell_qty else 'Sell',
+               self.font, enabled=sell_qty > 0).render(surface)
+        Button(buy_rect, f'Buy {buy_qty}' if buy_qty else 'Buy',
+               self.font, enabled=buy_qty > 0).render(surface)
+
+    def _draw_sparkline(self, surface: pg.Surface, rect: pg.Rect, points: list[int]) -> None:
+        # dark well + a trend-colored polyline of the recent price window.
+        # scaled to the window's own min/max so small wiggles stay visible.
+        pg.draw.rect(surface, COLOR_SPARK_BG, rect, border_radius=3)
+        if not points:
+            return
+        pts = points if len(points) > 1 else points * 2
+        lo, hi = min(pts), max(pts)
+        span = (hi - lo) or 1
+        n = len(pts)
+        coords = []
+        for i, p in enumerate(pts):
+            px = rect.x + 2 + int(i / (n - 1) * (rect.width - 5))
+            # invert y so a higher price sits higher on screen
+            py = rect.bottom - 3 - int((p - lo) / span * (rect.height - 6))
+            coords.append((px, py))
+        color = COLOR_SPARK_UP if pts[-1] >= pts[0] else COLOR_SPARK_DOWN
+        pg.draw.lines(surface, color, False, coords, 2)
+
+    def _spot_trade_qty(self, item_id: str, side: str) -> int:
+        # how many units a Buy/Sell click moves right now. 'all' uses the
+        # full affordable/available cap; a fixed mode only fires if the whole
+        # amount fits (clicking x100 with funds for 7 does nothing, rather
+        # than silently buying a partial 7).
+        cap = (self.spot_market.max_buy_qty(self.inventory, item_id) if side == 'buy'
+               else self.spot_market.max_sell_qty(self.inventory, item_id))
+        mode = self.spot_qty_mode
+        if mode == 'all':
+            return cap
+        return mode if cap >= mode else 0
 
     def _spot_button_rects(self, row_rect: pg.Rect) -> tuple[pg.Rect, pg.Rect]:
         # two buttons anchored to the right edge, leaving SPOT_RIGHT_PAD
@@ -252,6 +347,11 @@ class ExchangePanel:
         return sell, buy
 
     def _handle_spot_click(self, mouse_pos: tuple[int, int], held: dict | None) -> dict | None:
+        # quantity selector sits above the list, so test it first.
+        for seg, mode in zip(self._qty_seg_rects(self._content_rect()), SPOT_QTY_MODES):
+            if seg.collidepoint(mouse_pos):
+                self.spot_qty_mode = mode
+                return held
         idx = self.spot_list.row_at_pixel(mouse_pos)
         if idx is None:
             return held
@@ -265,24 +365,23 @@ class ExchangePanel:
         sell_rect, buy_rect = self._spot_button_rects(row_rect)
         item_id = ids[idx]
         if sell_rect.collidepoint(mouse_pos):
-            self.spot_market.sell(self.inventory, item_id)
+            qty = self._spot_trade_qty(item_id, 'sell')
+            if qty > 0:
+                self.spot_market.sell(self.inventory, item_id, qty)
         elif buy_rect.collidepoint(mouse_pos):
-            self.spot_market.buy(self.inventory, item_id)
+            qty = self._spot_trade_qty(item_id, 'buy')
+            if qty > 0:
+                self.spot_market.buy(self.inventory, item_id, qty)
         return held
 
     # --- inventory read shims ---
     #
-    # only the read-side helpers stick around — write paths went to
-    # SpotMarket.sell/buy and contracts.accept/cancel after the refactor.
+    # coin balance is the only read-side helper left; spot trade sizing
+    # moved to SpotMarket.max_buy_qty / max_sell_qty, and the spot/contract
+    # write paths live on SpotMarket and contracts.* respectively.
 
     def _coin_count(self) -> int:
         return slot_ops.coin_count(self.inventory)
-
-    def _inventory_count(self, item_id: str) -> int:
-        return slot_ops.count(self.inventory.slots, item_id)
-
-    def _can_add_to_inventory(self, item_id: str) -> bool:
-        return slot_ops.can_add(self.inventory.slots, item_id)
 
     # --- forward tab ---
 

@@ -5,6 +5,6 @@
     "break_time": 1.2,
     "render_offset": [-32, -64],
     "drops": [
-        {"item": "rock_chunk", "quantity": 2}
+        {"item": "copper_ingot", "quantity": 2}
     ]
 }

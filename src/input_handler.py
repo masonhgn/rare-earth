@@ -10,7 +10,7 @@ import pygame as pg
 
 from config import TILE_LENGTH, ITEM_ICON_SIZE
 from pathfinding import find_path
-from world import world_to_tile
+from world import world_to_tile, tile_center
 
 
 # offset for centering the held item icon on the cursor
@@ -195,6 +195,17 @@ def _on_left_click(game, event) -> None:
 
     if game.held_item is not None:
         wx, wy = game.screen.camera.screen_to_world((mx, my))
+        tile = world_to_tile((wx, wy))
+        # never strand a drop on a solid/occupied tile (e.g. the exchange or
+        # factory body): it would render under the entity sprite and sit on a
+        # tile the player can't walk onto, so it could never be picked up
+        # again. reroute to the nearest walkable tile and drop at its center.
+        # if nothing nearby is walkable, keep holding it rather than losing it.
+        if not game.world.is_walkable(*tile):
+            target = game.world.nearest_walkable(*tile)
+            if target is None:
+                return
+            wx, wy = tile_center(target)
         game.world.spawn_dropped_item(
             game.held_item['item_id'], game.held_item['quantity'], (wx, wy),
         )

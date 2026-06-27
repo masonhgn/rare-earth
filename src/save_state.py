@@ -33,7 +33,7 @@ from item import DroppedItem
 from prototype import load_prototype
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # saves live next to the project root, not inside src/. resolves relative
 # to this file so the path is stable regardless of cwd.
@@ -253,6 +253,9 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
         if item_id in saved_prices:
             g.spot_market.prices[item_id] = saved_prices[item_id]
     g.spot_market._tick_clock = 0.0
+    # restart the sparkline history from the restored prices (history is
+    # session-local and not persisted).
+    g.spot_market.seed_history()
 
     return True
 
@@ -320,6 +323,46 @@ def _migrate_v1_to_v2(data: dict) -> dict:
     return data
 
 
+def _migrate_v2_to_v3(data: dict) -> dict:
+    # rock_chunk was a visual duplicate of copper_ingot and got removed.
+    # rewrite every place an item id can appear so a pre-merge save doesn't
+    # reference a now-deleted item (which would crash at render time when
+    # load_item fails to find rock_chunk.json).
+    remap = {'rock_chunk': 'copper_ingot'}
+
+    def fix_slots(slots):
+        for s in slots or []:
+            if s and s.get('item_id') in remap:
+                s['item_id'] = remap[s['item_id']]
+
+    def fix_contract(c):
+        if c is None:
+            return
+        for key in ('deliver_item', 'receive_item'):
+            if c.get(key) in remap:
+                c[key] = remap[c[key]]
+
+    fix_slots(data.get('inventory_slots', []))
+    world = data.get('world', {})
+    for d in world.get('dropped', []):
+        if d.get('item_id') in remap:
+            d['item_id'] = remap[d['item_id']]
+    for ent in world.get('entities', []):
+        ex = ent.get('components', {}).get('exchange')
+        if not ex:
+            continue
+        fix_slots(ex.get('drop_box', []))
+        for c in ex.get('board', []):
+            fix_contract(c)
+        for c in ex.get('active', []):
+            fix_contract(c)
+    # drop the stale spot price entry; copper_ingot already carries its own.
+    data.get('spot_prices', {}).pop('rock_chunk', None)
+    data['version'] = 3
+    return data
+
+
 MIGRATIONS = {
     1: _migrate_v1_to_v2,
+    2: _migrate_v2_to_v3,
 }

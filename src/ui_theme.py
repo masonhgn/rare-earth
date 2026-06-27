@@ -69,6 +69,13 @@ COLOR_SCROLLBAR_THUMB = (140, 110, 75)
 
 COLOR_ROW_STRIPE = (0, 0, 0, 30)       # subtle dark tint on alternating rows
 
+# spot-tab price-history sparkline. line color reflects the window trend
+# (last point vs first); the backdrop is a solid dark well since the main
+# display surface has no per-pixel alpha to blend against.
+COLOR_SPARK_UP = (120, 200, 120)
+COLOR_SPARK_DOWN = (210, 110, 90)
+COLOR_SPARK_BG = (44, 33, 22)
+
 
 # --- widget corner radii (px) ---
 # named by role so the rounded-rect look stays consistent and a restyle
