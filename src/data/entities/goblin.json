@@ -1,0 +1,27 @@
+{
+    "grid": [["grass"]],
+    "tile_locked": false,
+    "editable": false,
+    "speed": 150,
+    "shadow": true,
+    "sprite_size": [128, 128],
+    "hitbox": [48, 80],
+    "animation": {
+        "default_state": "idle",
+        "states": {
+            "idle": "goblin_idle",
+            "walking_right": "goblin_walking_right",
+            "walking_left": "goblin_walking_left",
+            "walking_up": "goblin_walking_back",
+            "walking_down": "goblin_walking_front"
+        }
+    },
+    "mob": {
+        "aggro_radius": 256,
+        "deaggro_radius": 448,
+        "attack_radius": 56,
+        "attack_cooldown": 1.0,
+        "wander_speed": 70,
+        "hostile": true
+    }
+}

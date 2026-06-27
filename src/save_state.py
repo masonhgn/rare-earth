@@ -152,9 +152,22 @@ def _apply_exchange(target: dict, saved: dict, now_ms: int) -> None:
     target['active'] = saved.get('active', [])
 
 
+def _ser_mob(state: dict, now_ms: int) -> dict:
+    # mob ai state is transient (wander/chase + cooldown timers) — persist
+    # nothing and let it re-init fresh on load. this is also the seam where
+    # mob hp will be persisted once health lands.
+    return {}
+
+
+def _apply_mob(target: dict, saved: dict, now_ms: int) -> None:
+    # keep the prototype-fresh component; nothing to restore yet.
+    pass
+
+
 _COMPONENT_CODECS = {
     'machine': (_ser_machine, _apply_machine),
     'exchange': (_ser_exchange, _apply_exchange),
+    'mob': (_ser_mob, _apply_mob),
 }
 
 

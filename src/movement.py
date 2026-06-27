@@ -18,43 +18,46 @@ def player_collides_with_solid(world) -> bool:
     return False
 
 
-def follow_path(player, world, dt: float) -> tuple[float, float]:
-    # walk along the path at the player's speed. consumes as much of this
-    # frame's step as possible — if the player arrives at a waypoint with
-    # leftover step, the loop continues to the next waypoint in the same
-    # frame (so animation never sees a 0-vector mid-walk just because a
-    # waypoint flipped). returns the total (dx, dy) actually applied, used
-    # by update_player_animation.
-    sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    speed = player.prototype.speed or 0.0
+def follow_path(entity, world, dt: float, speed: float | None = None) -> tuple[float, float]:
+    # walk `entity` along entity.path at `speed` px/s (defaults to the
+    # entity's prototype speed). consumes as much of this frame's step as
+    # possible — if it arrives at a waypoint with leftover step, the loop
+    # continues to the next waypoint in the same frame (so animation never
+    # sees a 0-vector mid-walk just because a waypoint flipped). returns the
+    # total (dx, dy) actually applied, used by update_player_animation.
+    # generic over any entity with .path/.world_x/.world_y/.prototype, so
+    # both the player and MobSystem drive it.
+    sprite_w, sprite_h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+    if speed is None:
+        speed = entity.prototype.speed or 0.0
     step_remaining = speed * dt
     total_dx = total_dy = 0.0
-    while player.path and step_remaining > 0:
-        wp_tx, wp_ty = player.path[0]
+    while entity.path and step_remaining > 0:
+        wp_tx, wp_ty = entity.path[0]
         target_x = wp_tx * TILE_LENGTH + TILE_LENGTH / 2
         target_y = wp_ty * TILE_LENGTH + TILE_LENGTH / 2
-        center_x = player.world_x + sprite_w / 2
-        center_y = player.world_y + sprite_h / 2
+        center_x = entity.world_x + sprite_w / 2
+        center_y = entity.world_y + sprite_h / 2
         dx = target_x - center_x
         dy = target_y - center_y
         dist = (dx * dx + dy * dy) ** 0.5
         if dist < 4:
-            player.path.pop(0)
+            entity.path.pop(0)
             continue
         if step_remaining >= dist:
             # cover the rest of the leg this frame; pop and keep going.
-            player.world_x += dx
-            player.world_y += dy
+            entity.world_x += dx
+            entity.world_y += dy
             total_dx += dx
             total_dy += dy
             step_remaining -= dist
-            player.path.pop(0)
+            entity.path.pop(0)
         else:
             # partial step toward the waypoint.
             nx = dx / dist
             ny = dy / dist
-            player.world_x += nx * step_remaining
-            player.world_y += ny * step_remaining
+            entity.world_x += nx * step_remaining
+            entity.world_y += ny * step_remaining
             total_dx += nx * step_remaining
             total_dy += ny * step_remaining
             step_remaining = 0

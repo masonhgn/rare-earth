@@ -257,6 +257,13 @@ class Minimap:
         if clipped.w > 0 and clipped.h > 0:
             pg.draw.rect(target, (255, 255, 255), clipped, width=1)
 
+        # mob markers (red), drawn before the player so the player stays on
+        # top. Minimap already holds a world ref, so this is self-contained.
+        for mob in self.world.entities_with('mob'):
+            mx = x0 + int(mob.world_x / TILE_LENGTH * cs)
+            my = y0 + int(mob.world_y / TILE_LENGTH * cs)
+            pg.draw.circle(target, (230, 60, 60), (mx, my), max(2, cs))
+
         # player marker last so it always sits on top
         px = x0 + int(player_world_pos[0] / TILE_LENGTH * cs)
         py = y0 + int(player_world_pos[1] / TILE_LENGTH * cs)

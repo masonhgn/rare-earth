@@ -48,6 +48,16 @@ class Entity:
                 'board': [],
                 'active': [],
             }
+        if prototype.mob is not None:
+            # ai state for MobSystem: wander/chase + cooldown timers. the
+            # walking route itself lives on self.path (shared with the
+            # player's path-follow), so it isn't duplicated in here.
+            self.components['mob'] = {
+                'state': 'wander',       # 'wander' | 'chase'
+                'repath_cd': 0.0,        # seconds until next chase re-path
+                'wander_pause': 0.0,     # idle seconds between strolls
+                'attack_cd': 0.0,        # seconds until next attack allowed
+            }
 
     @property
     def machine_state(self) -> dict | None:

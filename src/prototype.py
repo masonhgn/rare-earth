@@ -87,6 +87,12 @@ class EntityPrototype:
     # leave None for non-interactable entities (rocks, trees, ore).
     interactable: Optional[str] = None
 
+    # optional mob spec: {"aggro_radius","deaggro_radius","attack_radius",
+    # "attack_cooldown","wander_speed","hostile"}. when set, Entity gets a
+    # 'mob' component and MobSystem drives wander/chase/attack each frame.
+    # movable mobs also set tile_locked=False + a top-level `speed` (chase).
+    mob: Optional[dict] = None
+
 
 _cache: dict[str, EntityPrototype] = {}
 

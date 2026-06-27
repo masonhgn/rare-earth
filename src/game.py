@@ -20,6 +20,7 @@ from hud import Hud, HudOverlay
 from settings import load_settings, save_settings
 from breaking import BreakSystem
 from factory import FactorySystem, FactoryPanel
+from mob import MobSystem
 from exchange import ExchangePanel
 from settings_panel import SettingsPanel
 from hud_tabs import HudTabs
@@ -57,6 +58,8 @@ class Game:
         # factory system + modal panel ui for machine entities.
         self.factory_system = FactorySystem(self.world)
         self.factory_panel = FactoryPanel()
+        # mob ai: wander + chase-the-player for entities with a 'mob' component.
+        self.mob_system = MobSystem(self.world)
         # global spot market: per-item prices walking on a 5s real-time
         # tick. constructed before ExchangePanel so the panel can hold a
         # ref to it for sell/buy.
@@ -150,6 +153,16 @@ class Game:
                 es['board'] = initial_board(self.spot_market)
         self.world.spawn_dropped_item('coin', 7, (8 * TILE_LENGTH, 6 * TILE_LENGTH))
         self.world.spawn_dropped_item('copper', 42, (4 * TILE_LENGTH, 6 * TILE_LENGTH))
+        # a wandering goblin near the player spawn (tile 6,6). routed through
+        # nearest_walkable so it can never land inside the factory (tiles
+        # x10-21,y6-13) or exchange (x4-7,y16-19) footprints; it strolls until
+        # the player comes within aggro range, then chases.
+        goblin_tile = self.world.nearest_walkable(8, 8)
+        if goblin_tile is not None:
+            self.world.add_entity(Entity(
+                load_prototype('goblin'),
+                (goblin_tile[0] * TILE_LENGTH, goblin_tile[1] * TILE_LENGTH),
+            ))
 
     def close_factory_panel(self) -> None:
         # closes the panel AND deposits any cursor-held item back into the
@@ -341,6 +354,8 @@ class Game:
         self.break_system.tick(self.dt)
         # advance any in-progress machine recipes
         self.factory_system.tick()
+        # advance mob ai (wander/chase) using the up-to-date player position
+        self.mob_system.tick(self.dt)
 
     # --- render ---
 
