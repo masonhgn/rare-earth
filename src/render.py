@@ -28,6 +28,7 @@ from config import (
 from item import load_item, get_item_icon
 from spritesheet import load_sprites
 from animation import AnimationLibrary
+from ui_theme import get_font
 
 
 # layer order used by Renderer.flush each frame. 'overlay' sits between
@@ -180,94 +181,227 @@ class Screen:
         self.surface.fill(color)
 
 
+# ---------------------------------------------------------------------------
+# overview map shared helpers (corner Minimap + full-screen MapView)
+# ---------------------------------------------------------------------------
+#
+# MAP_TERRAIN_COLORS maps sprite_id -> overview pixel color. unknown tiles
+# fall back to a neutral grey so nothing renders invisible.
+
+MAP_TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
+    'grass': (74, 122, 47),
+    'coal_ore': (45, 45, 50),
+    'copper_ore': (185, 100, 45),
+    'sand': (220, 195, 130),
+    'dirt': (135, 95, 65),
+    'stone': (140, 140, 150),
+    'cobble': (125, 125, 130),
+    'water': (60, 110, 180),
+    'planks': (180, 130, 80),
+    'brick': (175, 95, 70),
+    'cinder': (150, 150, 160),
+}
+_MAP_GREY = (130, 130, 150)
+
+
+def _block_color(world, px: int, py: int, tpp: int) -> tuple[int, int, int]:
+    # color for an overview pixel covering the tpp x tpp tile block at
+    # (px*tpp, py*tpp): prefer any overlay (ore) tile so downsampled patches
+    # still read; otherwise the block's first base tile.
+    x0, y0 = px * tpp, py * tpp
+    base = None
+    for ty in range(y0, min(y0 + tpp, world.height)):
+        orow = world.overlay_grid[ty]
+        brow = world.map_grid[ty]
+        for tx in range(x0, min(x0 + tpp, world.width)):
+            if orow[tx] is not None:
+                return MAP_TERRAIN_COLORS.get(orow[tx], _MAP_GREY)
+            if base is None:
+                base = brow[tx]
+    return MAP_TERRAIN_COLORS.get(base if base is not None else 'grass', _MAP_GREY)
+
+
+def build_world_surface(world, max_px: int) -> tuple[pg.Surface, int]:
+    # downsampled snapshot of the whole world. tpp (tiles per pixel) scales so
+    # the surface's longest edge stays <= max_px, bounding both its size and
+    # build cost regardless of map dimensions. returns (surface, tpp).
+    tpp = max(1, math.ceil(max(world.width, world.height) / max_px))
+    mw = max(1, math.ceil(world.width / tpp))
+    mh = max(1, math.ceil(world.height / tpp))
+    surf = pg.Surface((mw, mh))
+    for py in range(mh):
+        for px in range(mw):
+            surf.set_at((px, py), _block_color(world, px, py, tpp))
+    return surf, tpp
+
+
 class Minimap:
-    # top-down overview rendered in a screen corner. terrain is cached as
-    # a static surface (one-time build at world load); only the player
-    # marker and view rectangle are redrawn each frame, which is cheap.
-    #
-    # TERRAIN_COLORS maps sprite_id -> minimap pixel color. unknown tiles
-    # fall back to a neutral grey so nothing renders invisible.
+    # corner overview of the area *around the player* (not the whole world —
+    # that's MapView / Tab). a VIEW_TILES x VIEW_TILES window centered on the
+    # player's tile, rendered 1px/tile into a small surface then scaled up into
+    # the BOX_PX corner box. the window surface is cached and rebuilt only when
+    # the player crosses into a new tile (or a visible tile changes), so it's
+    # cheap per frame and crisp regardless of how big the world is.
 
-    TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
-        'grass': (74, 122, 47),
-        'coal_ore': (45, 45, 50),
-        'copper_ore': (185, 100, 45),
-        'sand': (220, 195, 130),
-        'dirt': (135, 95, 65),
-        'stone': (140, 140, 150),
-        'cobble': (125, 125, 130),
-        'water': (60, 110, 180),
-        'planks': (180, 130, 80),
-        'brick': (175, 95, 70),
-        'cinder': (150, 150, 160),
-    }
+    BOX_PX = 200        # on-screen size of the square minimap box
+    VIEW_TILES = 64     # tiles across the window, centered on the player
+    VOID = (18, 16, 20)  # cells beyond the map edge
 
-    def __init__(self, world, cell_size: int = 2, padding: int = 12):
+    def __init__(self, world, padding: int = 12):
         self.world = world
-        self.cell_size = cell_size
         self.padding = padding
-        self.terrain = self._build_terrain()
+        self._surf: pg.Surface | None = None
+        self._center: tuple[int, int] | None = None  # tile the cache is built for
 
-    def _build_terrain(self) -> pg.Surface:
-        # paint the base terrain layer, then stamp any overlay tile color
-        # over the top so ore patches read on the minimap.
-        cs = self.cell_size
-        w = self.world.width * cs
-        h = self.world.height * cs
-        surf = pg.Surface((w, h), pg.SRCALPHA)
-        overlay = getattr(self.world, 'overlay_grid', None)
-        for y, row in enumerate(self.world.map_grid):
-            for x, tile in enumerate(row):
-                rect = pg.Rect(x * cs, y * cs, cs, cs)
-                surf.fill(self.TERRAIN_COLORS.get(tile, (130, 130, 150)), rect)
-                if overlay is not None:
-                    top = overlay[y][x]
-                    if top is not None:
-                        surf.fill(self.TERRAIN_COLORS.get(top, (130, 130, 150)), rect)
-        return surf
+    def update_cell(self, tx: int, ty: int) -> None:
+        # a tile changed (e.g. ore mined): drop the cache so the next render
+        # rebuilds the window. simpler than locating the affected pixel.
+        self._surf = None
 
     def rebuild(self) -> None:
-        # call after any mutation to world.map_grid that needs to show up.
-        self.terrain = self._build_terrain()
+        self._surf = None
+
+    def _build(self, ctx: int, cty: int) -> pg.Surface:
+        # VIEW_TILES square, 1px/tile, centered on (ctx, cty); out-of-bounds
+        # tiles render as VOID so the map edge is visible.
+        n = self.VIEW_TILES
+        half = n // 2
+        w, h = self.world.width, self.world.height
+        surf = pg.Surface((n, n))
+        for j in range(n):
+            ty = cty - half + j
+            in_row = 0 <= ty < h
+            for i in range(n):
+                tx = ctx - half + i
+                if in_row and 0 <= tx < w:
+                    surf.set_at((i, j), _block_color(self.world, tx, ty, 1))
+                else:
+                    surf.set_at((i, j), self.VOID)
+        return surf
 
     def render(self, target: pg.Surface, screen_size: tuple[int, int],
                camera_offset: pg.math.Vector2,
                player_world_pos: tuple[float, float]) -> None:
-        cs = self.cell_size
-        tw, th = self.terrain.get_size()
-        # top-right corner placement
-        x0 = screen_size[0] - tw - self.padding
+        # window centers on the player's tile (camera_offset is unused — the
+        # player is always at the middle of this local view).
+        ctx = int(player_world_pos[0] // TILE_LENGTH)
+        cty = int(player_world_pos[1] // TILE_LENGTH)
+        if self._surf is None or self._center != (ctx, cty):
+            self._surf = self._build(ctx, cty)
+            self._center = (ctx, cty)
+
+        box = self.BOX_PX
+        x0 = screen_size[0] - box - self.padding
         y0 = self.padding
 
-        # darker backdrop so the minimap reads against any terrain underneath
-        backdrop = pg.Surface((tw + 4, th + 4), pg.SRCALPHA)
+        backdrop = pg.Surface((box + 4, box + 4), pg.SRCALPHA)
         backdrop.fill((0, 0, 0, 200))
         target.blit(backdrop, (x0 - 2, y0 - 2))
-        target.blit(self.terrain, (x0, y0))
+        target.blit(pg.transform.scale(self._surf, (box, box)), (x0, y0))
 
-        # view rect: project the visible world area onto the minimap so the
-        # player can see what slice of the world they're currently looking at.
-        sw, sh = screen_size
-        vw = (sw / TILE_LENGTH) * cs
-        vh = (sh / TILE_LENGTH) * cs
-        vx = x0 + (camera_offset.x / TILE_LENGTH) * cs
-        vy = y0 + (camera_offset.y / TILE_LENGTH) * cs
-        view_rect = pg.Rect(int(vx), int(vy), int(vw), int(vh))
-        clipped = view_rect.clip(pg.Rect(x0, y0, tw, th))
-        if clipped.w > 0 and clipped.h > 0:
-            pg.draw.rect(target, (255, 255, 255), clipped, width=1)
+        # markers. ppt = display px per world tile inside the box.
+        n = self.VIEW_TILES
+        half = n // 2
+        ppt = box / n
 
-        # mob markers (red), drawn before the player so the player stays on
-        # top. Minimap already holds a world ref, so this is self-contained.
+        # mobs inside the window (red)
         for mob in self.world.entities_with('mob'):
-            mx = x0 + int(mob.world_x / TILE_LENGTH * cs)
-            my = y0 + int(mob.world_y / TILE_LENGTH * cs)
-            pg.draw.circle(target, (230, 60, 60), (mx, my), max(2, cs))
+            dx = mob.world_x / TILE_LENGTH - ctx
+            dy = mob.world_y / TILE_LENGTH - cty
+            if -half <= dx <= half and -half <= dy <= half:
+                mx = x0 + int((dx + half) * ppt)
+                my = y0 + int((dy + half) * ppt)
+                pg.draw.circle(target, (230, 60, 60), (mx, my), 3)
 
-        # player marker last so it always sits on top
-        px = x0 + int(player_world_pos[0] / TILE_LENGTH * cs)
-        py = y0 + int(player_world_pos[1] / TILE_LENGTH * cs)
-        pg.draw.circle(target, (255, 230, 70), (px, py), max(2, cs))
+        # player: always at the box center (the window is centered on them)
+        pg.draw.circle(target, (255, 230, 70), (x0 + box // 2, y0 + box // 2), 3)
+
+        # frame
+        pg.draw.rect(target, (200, 170, 110), pg.Rect(x0 - 2, y0 - 2, box + 4, box + 4), width=1)
+
+
+class MapView:
+    # full-screen WHOLE-WORLD map overlay, toggled with Tab. unlike the corner
+    # Minimap (which is local to the player), this shows the entire world,
+    # downsampled. it builds + caches its own surface (rebuilt only if the map
+    # dimensions change), drawn centered over a dimmed backdrop with live
+    # player/mob markers and the current viewport box.
+
+    MAX_PX = 512
+
+    def __init__(self, world) -> None:
+        self.world = world
+        self.open = False
+        self._surface: pg.Surface | None = None
+        self._tpp = 1
+        self._dims: tuple[int, int] | None = None
+
+    def toggle(self) -> None:
+        self.open = not self.open
+
+    def close(self) -> None:
+        self.open = False
+
+    def _ensure_surface(self) -> None:
+        dims = (self.world.width, self.world.height)
+        if self._surface is None or self._dims != dims:
+            self._surface, self._tpp = build_world_surface(self.world, self.MAX_PX)
+            self._dims = dims
+
+    def render(self, target: pg.Surface, screen_size: tuple[int, int],
+               camera_offset: pg.math.Vector2) -> None:
+        if not self.open:
+            return
+        self._ensure_surface()
+        world = self.world
+        sw, sh = screen_size
+
+        # dim the world behind the map
+        backdrop = pg.Surface((sw, sh), pg.SRCALPHA)
+        backdrop.fill((0, 0, 0, 190))
+        target.blit(backdrop, (0, 0))
+
+        # fit the whole-world surface within the screen, preserving aspect.
+        mw, mh = self._surface.get_size()
+        margin = 56
+        scale = max(0.01, min((sw - 2 * margin) / mw, (sh - 2 * margin) / mh))
+        dw, dh = max(1, int(mw * scale)), max(1, int(mh * scale))
+        scaled = pg.transform.scale(self._surface, (dw, dh))
+        ox, oy = (sw - dw) // 2, (sh - dh) // 2
+
+        pg.draw.rect(target, (24, 18, 12), pg.Rect(ox - 4, oy - 4, dw + 8, dh + 8))
+        target.blit(scaled, (ox, oy))
+        pg.draw.rect(target, (200, 170, 110), pg.Rect(ox - 4, oy - 4, dw + 8, dh + 8), width=2)
+
+        # display pixels per world tile = surface-px-per-tile * display scale.
+        ppt = (1.0 / self._tpp) * scale
+
+        def to_screen(wx, wy):
+            return (ox + int(wx / TILE_LENGTH * ppt), oy + int(wy / TILE_LENGTH * ppt))
+
+        # current viewport rectangle, clipped to the map frame
+        view = pg.Rect(
+            *to_screen(camera_offset.x, camera_offset.y),
+            max(1, int((sw / TILE_LENGTH) * ppt)),
+            max(1, int((sh / TILE_LENGTH) * ppt)),
+        ).clip(pg.Rect(ox, oy, dw, dh))
+        if view.w > 0 and view.h > 0:
+            pg.draw.rect(target, (255, 255, 255), view, width=2)
+
+        # mob markers (red), then the player (yellow) on top
+        for mob in world.entities_with('mob'):
+            mx, my = to_screen(mob.world_x, mob.world_y)
+            pg.draw.circle(target, (230, 60, 60), (mx, my), 4)
+        player = world.get_player()
+        psw, psh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        px, py = to_screen(player.world_x + psw / 2, player.world_y + psh / 2)
+        pg.draw.circle(target, (255, 230, 70), (px, py), 5)
+
+        # title + hint
+        target.blit(get_font(28).render('World Map', True, (235, 225, 200)),
+                    (ox, max(6, oy - 38)))
+        hint = get_font(16).render('Tab / Esc to close', True, (205, 195, 175))
+        target.blit(hint, (ox + dw - hint.get_width(), max(6, oy - 26)))
 
 
 class WorldRenderer:

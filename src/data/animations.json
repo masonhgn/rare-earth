@@ -39,6 +39,24 @@
         "spacing": 1,
         "fps": 7
     },
+    "player_attacking_right": {
+        "file": "src/data/sprites/player/attacking_right.png",
+        "frames": 2,
+        "size": [103, 128],
+        "margin": 1,
+        "spacing": 1,
+        "canvas": [128, 128],
+        "fps": 10
+    },
+    "player_attacking_left": {
+        "file": "src/data/sprites/player/attacking_left.png",
+        "frames": 2,
+        "size": [103, 128],
+        "margin": 1,
+        "spacing": 1,
+        "canvas": [128, 128],
+        "fps": 10
+    },
     "goblin_idle": {
         "file": "src/data/sprites/mobs/goblin_idle.png",
         "frames": 4,
@@ -78,5 +96,23 @@
         "margin": 1,
         "spacing": 1,
         "fps": 7
+    },
+    "goblin_attacking_right": {
+        "file": "src/data/sprites/mobs/attacking_right.png",
+        "frames": 2,
+        "size": [103, 128],
+        "margin": 1,
+        "spacing": 1,
+        "canvas": [128, 128],
+        "fps": 10
+    },
+    "goblin_attacking_left": {
+        "file": "src/data/sprites/mobs/attacking_left.png",
+        "frames": 2,
+        "size": [103, 128],
+        "margin": 1,
+        "spacing": 1,
+        "canvas": [128, 128],
+        "fps": 10
     }
 }

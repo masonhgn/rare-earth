@@ -27,6 +27,11 @@ class Entity:
         # popping when within ~arrival_threshold pixels. None / empty = idle.
         self.path: list[tuple[int, int]] = []
 
+        # transient knockback impulse (px/s), set when a hit lands and decayed
+        # each frame by movement.apply_knockback. not serialized.
+        self.knockback_x = 0.0
+        self.knockback_y = 0.0
+
         # per-entity component states keyed by name. each system that
         # ticks entities (FactorySystem, ContractSystem) iterates entities
         # carrying its component via world.entities_with(name).
@@ -56,7 +61,7 @@ class Entity:
                 'state': 'wander',       # 'wander' | 'chase'
                 'repath_cd': 0.0,        # seconds until next chase re-path
                 'wander_pause': 0.0,     # idle seconds between strolls
-                'attack_cd': 0.0,        # seconds until next attack allowed
+                'attack_cd': 0.0,        # seconds until next melee swing
             }
 
     @property

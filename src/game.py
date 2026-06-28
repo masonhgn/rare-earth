@@ -14,7 +14,7 @@ import pygame as pg
 
 from config import TILE_LENGTH, TITLE
 from world import World
-from render import Screen, Minimap, WorldRenderer
+from render import Screen, Minimap, WorldRenderer, MapView
 from inventory import Inventory
 from hud import Hud, HudOverlay
 from settings import load_settings, save_settings
@@ -50,6 +50,9 @@ class Game:
         self.inventory = Inventory()
         self.hud = Hud()
         self.minimap = Minimap(self.world)
+        # full-screen whole-world map overlay (Tab). builds its own surface;
+        # the corner minimap is local (the area around the player).
+        self.map_view = MapView(self.world)
         self.hud.visible = self.settings.get('show_hud', True)
         # break state, drag-mining mode, particle effects all live here.
         self.break_system = BreakSystem(self.world, self.screen.camera, self.minimap)
@@ -59,7 +62,8 @@ class Game:
         self.factory_system = FactorySystem(self.world)
         self.factory_panel = FactoryPanel()
         # mob ai: wander + chase-the-player for entities with a 'mob' component.
-        self.mob_system = MobSystem(self.world)
+        # takes break_system so it can kick up dust where a knocked mob lands.
+        self.mob_system = MobSystem(self.world, self.break_system)
         # global spot market: per-item prices walking on a 5s real-time
         # tick. constructed before ExchangePanel so the panel can hold a
         # ref to it for sell/buy.
@@ -245,6 +249,45 @@ class Game:
         else:
             self.settings_panel.open_panel(self.display.screen_size)
 
+    def toggle_map(self) -> None:
+        # Tab toggles the full-screen world map. opening it closes any other
+        # modal and returns a cursor-held item so nothing is stranded behind it.
+        if self.map_view.open:
+            self.map_view.close()
+            return
+        if self.factory_panel.open:
+            self.close_factory_panel()
+        if self.exchange_panel.open:
+            self.close_exchange_panel()
+        if self.settings_panel.open:
+            self.settings_panel.close()
+        self._deposit_held_item()
+        self.map_view.open = True
+
+    def start_attack(self, facing: str = 'right') -> None:
+        # play the one-shot sword swing on the player, facing left or right.
+        # normal movement facing resumes on its own once it finishes (see
+        # _update). damage is TBD — animation only.
+        if self.map_view.open:
+            return
+        player = self.world.get_player()
+        if player.anim is not None:
+            state = 'attacking_left' if facing == 'left' else 'attacking_right'
+            player.anim.play_once(state, pg.time.get_ticks())
+
+    def player_attack(self, target) -> None:
+        # the player hits `target`: swing facing it and knock it back a little.
+        # called for an in-range click (or on arrival after walking to it).
+        # damage is TBD — animation + knockback only.
+        if self.map_view.open:
+            return
+        player = self.world.get_player()
+        psw = (player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH))[0]
+        tsw = (target.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH))[0]
+        facing = 'left' if (target.world_x + tsw / 2) < (player.world_x + psw / 2) else 'right'
+        self.start_attack(facing)
+        movement.knock_back(player, target)
+
     # --- main loop ---
 
     def start(self) -> None:
@@ -286,36 +329,41 @@ class Game:
         save_game(self)
 
     def _update(self) -> None:
+        # the full-screen map pauses the world: skip all simulation + input
+        # while it's open. event_loop still runs, so Tab/Esc can close it.
+        if self.map_view.open:
+            return
+        # untangle any overlapping living bodies first (e.g. a mob spawned on
+        # the player) so nothing is stuck before movement runs this frame.
+        movement.separate_living(self.world)
         self.day_clock.tick(self.dt)
         self.spot_market.tick(self.dt)
         player = self.world.get_player()
         dx, dy = input_handler.poll_movement(player, self.dt)
         moved_dx = moved_dy = 0.0
         if dx or dy:
-            # manual WASD movement preempts any active path.
+            # manual WASD preempts any active path. per-axis collision (solids
+            # + other living things) so the player slides instead of sticking
+            # or overlapping.
             player.path = []
             self.pending_action = None
-            # apply each axis separately so the player slides along solid
-            # walls instead of sticking. each axis reverts on collision.
-            if dx:
-                player.world_x += dx
-                if movement.player_collides_with_solid(self.world):
-                    player.world_x -= dx
-                else:
-                    moved_dx = dx
-            if dy:
-                player.world_y += dy
-                if movement.player_collides_with_solid(self.world):
-                    player.world_y -= dy
-                else:
-                    moved_dy = dy
-            movement.clamp_player_to_bounds(self.world)
+            moved_dx, moved_dy = movement.move_axis(self.world, player, dx, dy)
         elif player.path:
             moved_dx, moved_dy = movement.follow_path(player, self.world, self.dt)
+        # knockback impulse (from being hit) layered on top of normal movement;
+        # kick up dust where the player lands once the impulse runs out.
+        if movement.apply_knockback(self.world, player, self.dt):
+            hb = player.hitbox_rect()
+            self.break_system.spawn_dust((hb.centerx, hb.bottom), pg.time.get_ticks())
+        movement.clamp_player_to_bounds(self.world)
 
         # one canonical place to update the player's facing/animation state,
-        # using the *actual* movement vector applied this frame.
-        movement.update_player_animation(player, moved_dx, moved_dy)
+        # using the *actual* movement vector applied this frame. while a
+        # one-shot attack swing is mid-play, leave it alone; normal facing
+        # resumes automatically the frame after the swing finishes.
+        anim = player.anim
+        if anim is None or not anim.oneshot or anim.finished:
+            movement.update_player_animation(player, moved_dx, moved_dy)
 
         # pending click-to-walk action (break or open). fires the moment
         # the player is within range; both kinds clear the path so the
@@ -374,4 +422,5 @@ class Game:
         self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
+        self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera.offset)
         self.hud_overlay.render_cursor()

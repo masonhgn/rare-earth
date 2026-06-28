@@ -10,7 +10,9 @@
             "walking_right": "player_walking_right",
             "walking_left": "player_walking_left",
             "walking_up": "player_walking_up",
-            "walking_down": "player_walking_down"
+            "walking_down": "player_walking_down",
+            "attacking_right": "player_attacking_right",
+            "attacking_left": "player_attacking_left"
         }
     },
     "shadow": true,

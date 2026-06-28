@@ -32,11 +32,22 @@ class AnimationLibrary:
         n_frames = spec['frames']
         margin = spec.get('margin', 0)
         spacing = spec.get('spacing', 0)
+        # optional [w, h] canvas: each sliced frame is centered into a
+        # transparent surface of this size. lets a strip whose frames differ
+        # in size from the entity's other animations (e.g. a 103-wide attack
+        # swing vs 128-wide walks) line up without per-frame render offsets.
+        canvas = spec.get('canvas')
         frames = []
         for i in range(n_frames):
             x = margin + i * (frame_w + spacing)
             y = margin
-            frames.append(slice_cell(sheet, x, y, frame_w, frame_h))
+            cell = slice_cell(sheet, x, y, frame_w, frame_h)
+            if canvas is not None:
+                cw, ch = canvas
+                padded = pg.Surface((cw, ch), pg.SRCALPHA)
+                padded.blit(cell, ((cw - frame_w) // 2, (ch - frame_h) // 2))
+                cell = padded
+            frames.append(cell)
         return frames
 
     def get_frames(self, anim_id: str) -> list[pg.Surface]:
@@ -53,19 +64,45 @@ class AnimationState:
         self.current_state = default_state
         self.current_frame = 0
         self.last_update_ms = 0
+        # one-shot playback (e.g. an attack swing): while oneshot is True the
+        # animation plays through once and holds the last frame, flipping
+        # finished=True so the caller can revert to a looping state.
+        self.oneshot = False
+        self.finished = False
 
     def set_state(self, state: str) -> None:
         if state == self.current_state or state not in self.states:
             return
         self.current_state = state
         self.current_frame = 0
+        self.oneshot = False
+        self.finished = False
+
+    def play_once(self, state: str, now_ms: int) -> None:
+        # (re)start a one-shot animation from frame 0, even if already playing
+        # it (so repeated triggers restart the swing). plays through once, then
+        # holds the last frame and sets finished=True.
+        if state not in self.states:
+            return
+        self.current_state = state
+        self.current_frame = 0
+        self.last_update_ms = now_ms
+        self.oneshot = True
+        self.finished = False
 
     def advance(self, library: AnimationLibrary, now_ms: int) -> pg.Surface:
         anim_id = self.states[self.current_state]
         fps = library.get_fps(anim_id)
         frame_duration_ms = 1000 // max(fps, 1)
+        frames = library.get_frames(anim_id)
         if now_ms - self.last_update_ms >= frame_duration_ms:
             self.last_update_ms = now_ms
-            frames = library.get_frames(anim_id)
-            self.current_frame = (self.current_frame + 1) % len(frames)
-        return library.get_frames(anim_id)[self.current_frame]
+            if self.oneshot:
+                # play through once, then hold the final frame.
+                if self.current_frame + 1 >= len(frames):
+                    self.finished = True
+                else:
+                    self.current_frame += 1
+            else:
+                self.current_frame = (self.current_frame + 1) % len(frames)
+        return frames[self.current_frame]

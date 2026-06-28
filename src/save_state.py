@@ -6,7 +6,8 @@
 #   - spot market prices
 #   - player position
 #   - inventory slot contents
-#   - world map_grid + overlay_grid (random generation, so we persist them)
+#   - world map_grid + overlay_grid, RLE-encoded (both are highly redundant:
+#     base terrain is one tile id, the ore overlay is sparse)
 #   - placed entities, each with whatever components it carries
 #     (machine for factories, exchange for the trading post)
 #   - dropped items on the ground
@@ -19,11 +20,15 @@
 # `save.json.v{N}.bak` rather than discarded, so a downgrade or rollback
 # doesn't silently destroy player progress.
 #
-# write is atomic: data is dumped to a .tmp file and renamed into place,
-# so a mid-write crash never leaves a corrupted save.
+# the file is gzip-compressed json (the repetitive grids shrink ~150x on top
+# of RLE). write is atomic: data is dumped to a .tmp file and renamed into
+# place, so a mid-write crash never leaves a corrupted save. load auto-detects
+# gzip vs plain json, so pre-compression saves still read.
 
+import gzip
 import json
 import os
+from itertools import chain, groupby
 
 import pygame as pg
 
@@ -33,7 +38,7 @@ from item import DroppedItem
 from prototype import load_prototype
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # saves live next to the project root, not inside src/. resolves relative
 # to this file so the path is stable regardless of cwd.
@@ -44,6 +49,36 @@ SAVE_PATH = os.path.join(SAVE_DIR, 'save.json')
 
 def save_exists(path: str = SAVE_PATH) -> bool:
     return os.path.isfile(path)
+
+
+# ---------------------------------------------------------------------------
+# grid RLE + gzip file codec
+# ---------------------------------------------------------------------------
+#
+# the two world grids dominate the save (a 1000x1000 map is ~1M cells each),
+# but they're hugely redundant: base terrain is a single tile id and the ore
+# overlay is sparse. row-major run-length encoding collapses them to a few
+# thousand [value, count] runs, which also makes the write fast (we serialize
+# runs, not a million cells). the whole json is then gzipped on top.
+
+def _rle_encode(grid: list[list]) -> list:
+    return [[val, sum(1 for _ in grp)]
+            for val, grp in groupby(chain.from_iterable(grid))]
+
+
+def _rle_decode(runs: list, width: int, height: int) -> list[list]:
+    flat = list(chain.from_iterable([val] * count for val, count in runs))
+    return [flat[i * width:(i + 1) * width] for i in range(height)]
+
+
+def _read_save(path: str) -> dict:
+    # new saves are gzipped; pre-compression plain-json saves still load.
+    # detect by gzip magic bytes (1f 8b) rather than trusting the extension.
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if raw[:2] == b'\x1f\x8b':
+        raw = gzip.decompress(raw)
+    return json.loads(raw.decode('utf-8'))
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +119,8 @@ def save_game(g, path: str = SAVE_PATH) -> None:
         'world': {
             'width': w.width,
             'height': w.height,
-            'map_grid': w.map_grid,
-            'overlay_grid': w.overlay_grid,
+            'map_grid': _rle_encode(w.map_grid),
+            'overlay_grid': _rle_encode(w.overlay_grid),
             'entities': saved_entities,
             'dropped': [
                 {
@@ -101,7 +136,9 @@ def save_game(g, path: str = SAVE_PATH) -> None:
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
+    # gzip the json — the RLE grids are still text-repetitive, so gzip adds a
+    # large further win for near-zero cost. atomic via tmp + replace.
+    with gzip.open(tmp, 'wt', encoding='utf-8') as f:
         json.dump(data, f, separators=(',', ':'))
     os.replace(tmp, path)
 
@@ -191,8 +228,7 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
     # world without losing the original save.
     if not save_exists(path):
         return False
-    with open(path) as f:
-        data = json.load(f)
+    data = _read_save(path)
 
     data = _migrate_forward(data, path)
     if data is None:
@@ -201,11 +237,12 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
     w = g.world
     wd = data['world']
 
-    # wipe existing world contents before repopulating from the save
-    w.map_grid = wd['map_grid']
-    w.overlay_grid = wd['overlay_grid']
+    # wipe existing world contents before repopulating from the save.
+    # width/height first — the RLE grid decode needs them to reshape rows.
     w.width = wd['width']
     w.height = wd['height']
+    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
+    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
     w.entities.clear()
     w.tile_index.clear()
     w.dropped.clear()
@@ -375,7 +412,22 @@ def _migrate_v2_to_v3(data: dict) -> dict:
     return data
 
 
+def _migrate_v3_to_v4(data: dict) -> dict:
+    # v4 RLE-encodes the two world grids (they were raw 2D lists in v3) and
+    # gzips the file. the file-level gzip is handled transparently by
+    # _read_save; here we just convert the grids in-dict so the loader's
+    # _rle_decode works uniformly across versions.
+    world = data.get('world', {})
+    for key in ('map_grid', 'overlay_grid'):
+        grid = world.get(key)
+        if grid is not None:
+            world[key] = _rle_encode(grid)
+    data['version'] = 4
+    return data
+
+
 MIGRATIONS = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
+    3: _migrate_v3_to_v4,
 }

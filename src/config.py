@@ -27,9 +27,18 @@ TITLE = 'rare-earth'
 # tile geometry
 TILE_LENGTH = 64
 
+# world map dimensions, in tiles. rendering is viewport-culled, so per-frame
+# draw cost is independent of these. world generation, the minimap pre-render,
+# and save/load all scale with width*height — crank these to stress-test
+# loading. (baseline was 60x60.)
+WORLD_WIDTH = 1000
+WORLD_HEIGHT = 1000
+
 # player
 PLAYER_SPAWN = (400, 400)
 PLAYER_REACH_TILES = 4
+# melee reach (px, center-to-center) for attacking a clicked mob.
+PLAYER_ATTACK_RANGE = 120
 
 # world drops
 ITEM_STACK_DISTANCE = 40

@@ -100,6 +100,25 @@ def spawn_break_chunks(
     return out
 
 
+def spawn_dust_puff(world_pos: tuple[float, float], now_ms: int, count: int = 6) -> list[Particle]:
+    # a light puff that kicks up + outward — e.g. when a knocked-back body
+    # lands. lighter / smaller / shorter-lived than break chunks, and always
+    # biased upward so it reads as dust rather than debris.
+    cx, cy = world_pos
+    out: list[Particle] = []
+    for _ in range(count):
+        angle = random.uniform(0.0, 2 * math.pi)
+        speed = random.uniform(25, 80)
+        out.append(Particle(
+            world_x=cx, world_y=cy,
+            vx=math.cos(angle) * speed,
+            vy=-random.uniform(40, 110),
+            born_ms=now_ms, lifetime_ms=random.randint(250, 500),
+            color=(200, 190, 170), size=random.randint(2, 4),
+        ))
+    return out
+
+
 class BreakSystem:
     def __init__(self, world, camera, minimap):
         self.world = world
@@ -108,6 +127,12 @@ class BreakSystem:
 
         self.breaking: BreakState | None = None
         self.particles: list[Particle] = []
+
+    def spawn_dust(self, world_pos: tuple[float, float], now_ms: int) -> None:
+        # kick up a small dust puff at world_pos (e.g. where a knocked-back body
+        # lands). feeds the same particle list as break chunks, so it ticks and
+        # renders for free.
+        self.particles.extend(spawn_dust_puff(world_pos, now_ms))
 
     # --- public api ---
 
@@ -244,7 +269,7 @@ class BreakSystem:
         except FileNotFoundError:
             return
         self.world.overlay_grid[ty][tx] = None
-        self.minimap.rebuild()
+        self.minimap.update_cell(tx, ty)
         self._distribute_drops(roll_drops(proto.drops), world_pos)
 
     def _distribute_drops(self, drops: list[tuple[str, int]], world_pos: tuple[float, float]) -> None:

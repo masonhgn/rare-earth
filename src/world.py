@@ -18,7 +18,7 @@ import math
 import random
 import pygame as pg
 
-from config import TILE_LENGTH, PLAYER_SPAWN, PLAYER_REACH_TILES, ITEM_STACK_DISTANCE, DROPPED_ITEM_SIZE
+from config import TILE_LENGTH, PLAYER_SPAWN, PLAYER_REACH_TILES, ITEM_STACK_DISTANCE, DROPPED_ITEM_SIZE, WORLD_WIDTH, WORLD_HEIGHT
 from entity import Entity
 from prototype import load_prototype
 from item import DroppedItem, load_item, roll_drops
@@ -42,12 +42,15 @@ class World:
         self.height = 0
         # base terrain is grass with scattered ore patches sprinkled over it.
         # tweak counts/radii to taste; rarer ores should have fewer/smaller patches.
+        # patch counts scale with map area so ore density stays ~constant as the
+        # map grows (the 60x60 baseline used 8 coal / 5 copper patches).
+        area_scale = (WORLD_WIDTH * WORLD_HEIGHT) / (60 * 60)
         self.generate_world_map(
-            60, 60,
+            WORLD_WIDTH, WORLD_HEIGHT,
             base_tile='grass',
             patches=[
-                ('coal_ore', 8, 5),
-                ('copper_ore', 5, 4),
+                ('coal_ore', max(1, round(8 * area_scale)), 5),
+                ('copper_ore', max(1, round(5 * area_scale)), 4),
             ],
         )
 

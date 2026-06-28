@@ -8,7 +8,7 @@
 
 import pygame as pg
 
-from config import TILE_LENGTH, ITEM_ICON_SIZE
+from config import TILE_LENGTH, ITEM_ICON_SIZE, PLAYER_ATTACK_RANGE
 from pathfinding import find_path
 from world import world_to_tile, tile_center
 
@@ -75,6 +75,20 @@ class OpenOnArrival(PendingAction):
         game.open_modal_for_entity(self.target)
 
 
+class AttackOnArrival(PendingAction):
+    # walk-to-then-attack: fires the swing once the player is within melee
+    # range of the (moving) mob. drops itself if the mob is gone.
+    def __init__(self, mob) -> None:
+        self.mob = mob
+
+    def ready(self, game) -> bool:
+        return self.mob.id in game.world.entities and _in_attack_range(game, self.mob)
+
+    def fire(self, game) -> None:
+        if self.mob.id in game.world.entities:
+            game.player_attack(self.mob)
+
+
 def poll_movement(player, dt: float) -> tuple[float, float]:
     # returns the (dx, dy) the player would move this frame in pixels.
     # animation state is set by Game._update_player_animation after movement
@@ -132,14 +146,18 @@ def _on_keydown(game, event) -> None:
 
     if key == pg.K_b:
         game.inventory.toggle()
+    elif key == pg.K_TAB:
+        game.toggle_map()
     elif key == pg.K_F2:
         game.toggle_fullscreen()
     elif key == pg.K_F3:
         game.hud.toggle()
     elif key == pg.K_ESCAPE:
-        # close the highest-priority open panel first; if none are open,
+        # close the highest-priority open overlay first; if none are open,
         # bring up the settings modal (manual save + display mode).
-        if game.settings_panel.open:
+        if game.map_view.open:
+            game.map_view.close()
+        elif game.settings_panel.open:
             game.settings_panel.close()
         elif game.exchange_panel.open:
             game.close_exchange_panel()
@@ -163,6 +181,11 @@ def _on_left_click(game, event) -> None:
     #   4. drop held item into world
     #   5. world click for walk/break/open
     mx, my = event.pos
+
+    # the full-screen map swallows all clicks while open (it has no clickable
+    # elements; this just stops click-to-walk from firing behind it).
+    if game.map_view.open:
+        return
 
     # hud tabs sit on top and take priority over modal-outside-dismiss
     # so clicking the settings tab while settings is open toggles
@@ -217,6 +240,18 @@ def _on_left_click(game, event) -> None:
     wx, wy = game.screen.camera.screen_to_world((mx, my))
     tile = world_to_tile((wx, wy))
     if not game.world.in_bounds_tile(*tile):
+        return
+
+    # attack: clicking on a mob (e.g. a goblin) attacks it. in range -> swing
+    # now; out of range -> walk toward it and swing on arrival. takes priority
+    # over walk/break/open since the click landed on the mob's body.
+    target_mob = _click_mob_at(game, wx, wy)
+    if target_mob is not None:
+        game.click_marker = ((wx, wy), pg.time.get_ticks())
+        if _in_attack_range(game, target_mob):
+            game.player_attack(target_mob)
+        else:
+            _walk_to_mob(game, target_mob)
         return
 
     # what kind of entity is at the click? — drives the open/close routing.
@@ -317,6 +352,41 @@ def _click_breakable_at(game, tile):
     if not proto.editable:
         return None
     return (proto, None, tile)
+
+
+def _entity_center(e) -> tuple[float, float]:
+    w, h = e.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+    return (e.world_x + w / 2, e.world_y + h / 2)
+
+
+def _click_mob_at(game, wx: float, wy: float):
+    # the mob whose visible body (hitbox) contains the click, or None.
+    for ent in game.world.entities_with('mob'):
+        if ent.hitbox_rect().collidepoint(wx, wy):
+            return ent
+    return None
+
+
+def _in_attack_range(game, mob) -> bool:
+    pcx, pcy = _entity_center(game.world.get_player())
+    mcx, mcy = _entity_center(mob)
+    return (pcx - mcx) ** 2 + (pcy - mcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2
+
+
+def _walk_to_mob(game, mob) -> None:
+    # path toward the mob's current tile and queue an attack-on-arrival.
+    player = game.world.get_player()
+    sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+    player_tile = world_to_tile((player.world_x + sw / 2, player.world_y + sh / 2))
+    mob_tile = world_to_tile(_entity_center(mob))
+    goal = mob_tile if game.world.is_walkable(*mob_tile) else game.world.nearest_walkable(*mob_tile)
+    if goal is None:
+        return
+    path = find_path(game.world, player_tile, goal)
+    if path is None:
+        return
+    player.path = path
+    game.pending_action = AttackOnArrival(mob)
 
 
 def _modal_cascade(game):

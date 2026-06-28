@@ -13,15 +13,17 @@
             "walking_right": "goblin_walking_right",
             "walking_left": "goblin_walking_left",
             "walking_up": "goblin_walking_back",
-            "walking_down": "goblin_walking_front"
+            "walking_down": "goblin_walking_front",
+            "attacking_right": "goblin_attacking_right",
+            "attacking_left": "goblin_attacking_left"
         }
     },
     "mob": {
         "aggro_radius": 256,
         "deaggro_radius": 448,
-        "attack_radius": 56,
-        "attack_cooldown": 1.0,
         "wander_speed": 70,
-        "hostile": true
+        "hostile": true,
+        "attack_range": 96,
+        "attack_period": 1.0
     }
 }

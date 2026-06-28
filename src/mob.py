@@ -2,8 +2,8 @@
 # mob ai: per-frame wander + player-chase driven by A* pathfinding.
 #
 # MobSystem.tick(dt) advances every entity carrying a 'mob' component.
-# detection is straight-line distance (aggro / deaggro / attack radii);
-# *movement* routes through pathfinding.find_path and is walked with
+# detection is straight-line distance (aggro / deaggro radii); *movement*
+# routes through pathfinding.find_path and is walked with
 # movement.follow_path, reusing the same entity.path the player uses. facing /
 # animation is updated via movement.update_player_animation, so a mob with an
 # animation spec (the goblin) plays the right directional strip while a
@@ -12,13 +12,14 @@
 # per-mob state lives in components['mob'] (see entity.Entity):
 #   'wander' -> stroll to a random nearby walkable tile, pause, repeat.
 #               flips to 'chase' when a hostile mob's target enters aggro_radius.
-#   'chase'  -> re-path toward the player a few times a second and follow it;
-#               attack on cooldown when within attack_radius. flips back to
-#               'wander' past deaggro_radius (the gap between the two radii is
-#               hysteresis so it doesn't flip-flop right at the boundary).
+#   'chase'  -> re-path toward the player a few times a second and follow it.
+#               flips back to 'wander' past deaggro_radius (the gap between the
+#               two radii is hysteresis so it doesn't flip-flop at the boundary).
 
 import math
 import random
+
+import pygame as pg
 
 from config import TILE_LENGTH
 from pathfinding import find_path
@@ -49,13 +50,15 @@ def _center(entity) -> tuple[float, float]:
 
 
 class MobSystem:
-    def __init__(self, world) -> None:
+    def __init__(self, world, break_system) -> None:
         self.world = world
+        self.break_system = break_system
 
     def tick(self, dt: float) -> None:
         player = self.world.get_player()
         pcx, pcy = _center(player)
         player_tile = world_to_tile((pcx, pcy))
+        now_ms = pg.time.get_ticks()
         for mob in self.world.entities_with('mob'):
             spec = mob.prototype.mob
             ms = mob.components['mob']
@@ -72,17 +75,43 @@ class MobSystem:
                 ms['state'] = 'wander'
                 mob.path = []
 
-            # --- act ---
+            # --- act (movement) ---
             if ms['state'] == 'chase':
                 moved = self._chase(mob, ms, player_tile, (mcx, mcy), dt)
-                if dist <= spec['attack_radius'] and ms['attack_cd'] <= 0.0:
-                    ms['attack_cd'] = spec['attack_cooldown']
-                    self._attack(mob, player)
             else:
                 moved = self._wander(mob, ms, spec['wander_speed'], dt)
 
-            # facing/animation from the vector actually applied (idle on zero).
-            movement.update_player_animation(mob, *moved)
+            # --- fight back: swing within melee range on a randomized cadence,
+            # facing the player and knocking it back when it lands. damage TBD.
+            self._maybe_attack(mob, ms, spec, dist, player, pcx, mcx, now_ms)
+
+            # facing/animation: hold a one-shot swing while it plays; otherwise
+            # follow the movement vector (idle on zero).
+            anim = mob.anim
+            if anim is None or not anim.oneshot or anim.finished:
+                movement.update_player_animation(mob, *moved)
+
+            # decay any knockback this mob is under (e.g. from a player hit);
+            # kick up dust where it lands once the impulse runs out.
+            if movement.apply_knockback(self.world, mob, dt):
+                hb = mob.hitbox_rect()
+                self.break_system.spawn_dust((hb.centerx, hb.bottom), pg.time.get_ticks())
+
+    def _maybe_attack(self, mob, ms, spec, dist, player, pcx, mcx, now_ms) -> None:
+        # trigger a one-shot melee swing when in range + off cooldown. the swing
+        # faces the player and knocks the player back (the "hit"); the cooldown
+        # is the spec period jittered +-20%. damage is TBD.
+        if not spec.get('hostile') or mob.anim is None:
+            return
+        attack_range = spec.get('attack_range', 0)
+        if attack_range <= 0 or dist > attack_range or ms['attack_cd'] > 0.0:
+            return
+        if mob.anim.oneshot and not mob.anim.finished:  # already mid-swing
+            return
+        facing = 'left' if pcx < mcx else 'right'
+        mob.anim.play_once('attacking_' + facing, now_ms)
+        movement.knock_back(mob, player)
+        ms['attack_cd'] = spec.get('attack_period', 1.0) * random.uniform(0.8, 1.2)
 
     # --- behaviors ---
 
@@ -112,9 +141,3 @@ class MobSystem:
         if not mob.path:  # reached the end of the route
             ms['wander_pause'] = random.uniform(*WANDER_PAUSE_RANGE)
         return moved
-
-    def _attack(self, mob, player) -> None:
-        # health/damage isn't wired yet — this is the seam where it lands
-        # (e.g. player.hp -= spec['damage']). for now just announce it so the
-        # mechanic is observable.
-        print(f'mob {mob.id[:8]} attacks player')
