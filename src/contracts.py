@@ -123,9 +123,11 @@ class ContractSystem:
     # all present, complete the trade; otherwise the player forfeits
     # the collateral.
 
-    def __init__(self, world, inventory) -> None:
+    def __init__(self, world) -> None:
+        # resolves the recipient player at settle time (per-player contract
+        # ownership lands in Phase 3); no captured inventory, so it works for
+        # both the client and a headless server.
         self.world = world
-        self.inventory = inventory
 
     def settle_day_rollover(self, current_day: int) -> None:
         # called from Game._on_day_rollover with the new day. any active
@@ -168,12 +170,13 @@ class ContractSystem:
     def _pay_player(self, item_id: str, qty: int) -> None:
         if qty <= 0:
             return
-        leftover = self.inventory.add_item(item_id, qty)
+        # pay the (local) player; per-contract ownership lands in Phase 3.
+        player = self.world.get_player()
+        leftover = player.inventory.add_item(item_id, qty)
         if leftover > 0:
             # inventory rejected the full add (mismatched stacks fill it).
             # spit the rest at the player's feet so the payout isn't lost.
             from config import TILE_LENGTH
-            player = self.world.get_player()
             sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
             cx = player.world_x + sw / 2
             cy = player.world_y + sh / 2

@@ -17,20 +17,27 @@ from world import World
 from render import Screen, Minimap, WorldRenderer, MapView
 from inventory import Inventory
 from hud import Hud, HudOverlay
+from ui_theme import get_font
 from settings import load_settings, save_settings
 from breaking import BreakSystem
 from factory import FactorySystem, FactoryPanel
 from mob import MobSystem
+from combat import CombatSystem
 from exchange import ExchangePanel
 from settings_panel import SettingsPanel
 from hud_tabs import HudTabs
 from display import DisplayService
 from spot_market import SpotMarket
-from contracts import ContractSystem, initial_board
+from contracts import ContractSystem
 from clock import DayClock
 from save_state import save_game, load_game
 import movement
 import input_handler
+import worldgen
+
+
+# how long the black "YOU DIED" screen holds before the player respawns.
+DEATH_SCREEN_SEC = 2.0
 
 
 class Game:
@@ -47,29 +54,35 @@ class Game:
         )
 
         self.world = World()
-        self.inventory = Inventory()
+        # the inventory VIEW renders/edits the local player's data, which now
+        # lives on the player entity's 'player' component (per-player). the
+        # getter re-resolves each access, so it survives respawn/load.
+        self.inventory = Inventory(get_data=lambda: self.world.get_player().inventory)
         self.hud = Hud()
         self.minimap = Minimap(self.world)
         # full-screen whole-world map overlay (Tab). builds its own surface;
         # the corner minimap is local (the area around the player).
         self.map_view = MapView(self.world)
         self.hud.visible = self.settings.get('show_hud', True)
-        # break state, drag-mining mode, particle effects all live here.
-        self.break_system = BreakSystem(self.world, self.screen.camera, self.minimap)
+        # break state, drag-mining mode, particle effects all live here. the
+        # tile-changed callback refreshes the (client-only) minimap on mining.
+        self.break_system = BreakSystem(self.world, on_tile_changed=self.minimap.update_cell)
+        # combat: health, damage, floating numbers + over-head health bars.
+        self.combat = CombatSystem(self.world)
         # queues the world layers + break visuals onto the renderer each frame.
         self.world_renderer = WorldRenderer(self.screen, self.world, self.break_system)
         # factory system + modal panel ui for machine entities.
         self.factory_system = FactorySystem(self.world)
         self.factory_panel = FactoryPanel()
         # mob ai: wander + chase-the-player for entities with a 'mob' component.
-        # takes break_system so it can kick up dust where a knocked mob lands.
-        self.mob_system = MobSystem(self.world, self.break_system)
+        # takes break_system (dust on landing) + combat (damage the player).
+        self.mob_system = MobSystem(self.world, self.break_system, self.combat)
         # global spot market: per-item prices walking on a 5s real-time
         # tick. constructed before ExchangePanel so the panel can hold a
         # ref to it for sell/buy.
         self.spot_market = SpotMarket()
         # contract system: settles active contracts on day rollover.
-        self.contract_system = ContractSystem(self.world, self.inventory)
+        self.contract_system = ContractSystem(self.world)
         # global day clock. on_rollover triggers contract settlement +
         # autosave; constructed here so we can pass it to ExchangePanel.
         self.day_clock = DayClock()
@@ -97,8 +110,8 @@ class Game:
         # tooltip, held item) — reads display state off this Game.
         self.hud_overlay = HudOverlay(self)
 
-        # ui state
-        self.held_item: dict | None = None
+        # ui state. held_item (the drag cursor) lives on the local player's
+        # 'player' component now — see the Game.held_item property below.
         self.hover_pos: tuple[int, int] = (0, 0)
 
         # click marker: yellow X drawn at the click world pos, fading out
@@ -117,6 +130,11 @@ class Game:
         self.dt = 0.0
         self.running = False
 
+        # death screen: on player death, hold a paused black "YOU DIED" screen
+        # for DEATH_SCREEN_SEC, then respawn.
+        self.dying = False
+        self.death_timer = 0.0
+
 
         # restore prior session from disk if a save exists; otherwise
         # seed the world with the default factory + starter drops.
@@ -127,46 +145,22 @@ class Game:
             self._seed_world()
         self._position_inventory()
 
+    # --- per-player cursor: held_item lives on the local player's component ---
+
+    @property
+    def held_item(self):
+        return self.world.get_player().held_item
+
+    @held_item.setter
+    def held_item(self, value) -> None:
+        self.world.get_player().held_item = value
+
     # --- setup helpers ---
 
     def _seed_world(self) -> None:
-        # ore patches live in world.overlay_grid (placed by generate_world_map).
-        # a couple of dropped items so pickup is visible right away.
-        # factory: 12x8 tile footprint, sprite matches (no overflow). anchored
-        # at tile (10, 6) — well inland from every edge, visible to the east
-        # of the player spawn (tile 6,6).
-        from entity import Entity
-        from prototype import load_prototype
-        try:
-            self.world.add_entity(Entity(load_prototype('factory'), (10 * TILE_LENGTH, 6 * TILE_LENGTH)))
-        except ValueError:
-            pass
-        # exchange: 4x4 footprint at tile (4, 16) — south of player spawn,
-        # short walk for a fresh player. ValueError swallowed so a regen of
-        # the random overlay grid clipping the spot doesn't crash boot.
-        try:
-            self.world.add_entity(Entity(load_prototype('exchange'), (4 * TILE_LENGTH, 16 * TILE_LENGTH)))
-        except ValueError:
-            pass
-        # seed the contract board on every exchange entity. only fires
-        # on fresh worlds — save loads come through load_game which
-        # restores the board verbatim.
-        for ent in self.world.entities_with('exchange'):
-            es = ent.components['exchange']
-            if not es['board']:
-                es['board'] = initial_board(self.spot_market)
-        self.world.spawn_dropped_item('coin', 7, (8 * TILE_LENGTH, 6 * TILE_LENGTH))
-        self.world.spawn_dropped_item('copper', 42, (4 * TILE_LENGTH, 6 * TILE_LENGTH))
-        # a wandering goblin near the player spawn (tile 6,6). routed through
-        # nearest_walkable so it can never land inside the factory (tiles
-        # x10-21,y6-13) or exchange (x4-7,y16-19) footprints; it strolls until
-        # the player comes within aggro range, then chases.
-        goblin_tile = self.world.nearest_walkable(8, 8)
-        if goblin_tile is not None:
-            self.world.add_entity(Entity(
-                load_prototype('goblin'),
-                (goblin_tile[0] * TILE_LENGTH, goblin_tile[1] * TILE_LENGTH),
-            ))
+        # default world contents (factory, exchange, boards, a goblin, pickups),
+        # shared with the headless server via worldgen so they can't drift.
+        worldgen.seed_world(self.world, self.spot_market)
 
     def close_factory_panel(self) -> None:
         # closes the panel AND deposits any cursor-held item back into the
@@ -252,6 +246,8 @@ class Game:
     def toggle_map(self) -> None:
         # Tab toggles the full-screen world map. opening it closes any other
         # modal and returns a cursor-held item so nothing is stranded behind it.
+        if self.dying:
+            return
         if self.map_view.open:
             self.map_view.close()
             return
@@ -276,9 +272,8 @@ class Game:
             player.anim.play_once(state, pg.time.get_ticks())
 
     def player_attack(self, target) -> None:
-        # the player hits `target`: swing facing it and knock it back a little.
-        # called for an in-range click (or on arrival after walking to it).
-        # damage is TBD — animation + knockback only.
+        # the player hits `target`: swing facing it, knock it back, and deal
+        # damage. called for an in-range click (or on arrival after walking).
         if self.map_view.open:
             return
         player = self.world.get_player()
@@ -287,6 +282,29 @@ class Game:
         facing = 'left' if (target.world_x + tsw / 2) < (player.world_x + psw / 2) else 'right'
         self.start_attack(facing)
         movement.knock_back(player, target)
+        self.combat.hit(target, pg.time.get_ticks())
+
+    def _respawn_player(self, player) -> None:
+        # on death: drop the whole inventory where the player fell, then
+        # respawn at the middle of the map at full health.
+        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        death_pos = (player.world_x + sw / 2, player.world_y + sh / 2)
+        inv = player.inventory
+        for slot in inv.slots:
+            if slot is not None:
+                self.world.spawn_dropped_item(slot['item_id'], slot['quantity'], death_pos)
+        inv.slots = [None] * len(inv.slots)
+        # respawn centered on the map, full health, transient state cleared.
+        player.world_x = self.world.width * TILE_LENGTH / 2 - sw / 2
+        player.world_y = self.world.height * TILE_LENGTH / 2 - sh / 2
+        player.health = player.max_health
+        player.last_damage_ms = None
+        player.knockback_x = player.knockback_y = 0.0
+        player.path = []
+        self.pending_action = None
+        # snap the camera to the respawn point now (it already followed the
+        # death spot earlier this frame) so there's no one-frame jump.
+        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=(sw, sh))
 
     # --- main loop ---
 
@@ -329,6 +347,13 @@ class Game:
         save_game(self)
 
     def _update(self) -> None:
+        # death screen: hold a paused black "YOU DIED" screen, then respawn.
+        if self.dying:
+            self.death_timer -= self.dt
+            if self.death_timer <= 0.0:
+                self._respawn_player(self.world.get_player())
+                self.dying = False
+            return
         # the full-screen map pauses the world: skip all simulation + input
         # while it's open. event_loop still runs, so Tab/Esc can close it.
         if self.map_view.open:
@@ -404,16 +429,29 @@ class Game:
         self.factory_system.tick()
         # advance mob ai (wander/chase) using the up-to-date player position
         self.mob_system.tick(self.dt)
+        # age out floating damage numbers
+        self.combat.tick(pg.time.get_ticks())
+        # player death: kick off the YOU DIED screen; the respawn (drop loot +
+        # recenter) fires when it finishes, in the dying branch above.
+        if player.health is not None and player.health <= 0:
+            self.dying = True
+            self.death_timer = DEATH_SCREEN_SEC
 
     # --- render ---
 
     def _render(self) -> None:
+        if self.dying:
+            self._render_death_screen()
+            return
         self.screen.clear()
         cam = self.screen.camera
         culling = self.screen.culling
 
         # world layers + break visuals, queued and flushed in LAYERS order.
         self.click_marker = self.world_renderer.flush(cam, culling, self.click_marker)
+        # combat overlays (over-head health bars + floating damage numbers)
+        # sit above the world but below the screen-space ui.
+        self.combat.render_world(self.screen.surface, cam, culling, pg.time.get_ticks())
 
         # screen-space ui drawn directly on top of the flushed world.
         self.hud_overlay.render_base()
@@ -424,3 +462,10 @@ class Game:
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera.offset)
         self.hud_overlay.render_cursor()
+
+    def _render_death_screen(self) -> None:
+        # full black screen with big red YOU DIED text, held for DEATH_SCREEN_SEC.
+        surf = self.screen.surface
+        surf.fill((0, 0, 0))
+        label = get_font(72).render('YOU DIED', True, (170, 30, 30))
+        surf.blit(label, label.get_rect(center=(self.screen.width // 2, self.screen.height // 2)))

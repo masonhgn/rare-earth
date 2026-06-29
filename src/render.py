@@ -465,17 +465,23 @@ class WorldRenderer:
                     self._queue_flash('overlay', img.get_size(), (sx + jx, sy + jy), flash_alpha)
 
     def _queue_entities(self, cam, culling) -> None:
-        player = self.world.get_player()
         now_ms = pg.time.get_ticks()
         sprites = self.screen.sprites
         animations = self.screen.animations
 
-        # split placed entities (non-player) for crude y-sort, then player last
-        placed = [e for e in self.world.entities.values() if e is not player]
+        # everything non-player on the 'entity' layer, all players on the
+        # 'player' layer (drawn on top). role-based so it works for a single
+        # local player and for many networked players alike — no singleton.
+        placed = []
+        players = []
+        for e in self.world.entities.values():
+            (players if e.is_player else placed).append(e)
         placed.sort(key=lambda e: e.world_y)
         for entity in placed:
             self._queue_one_entity(entity, cam, culling, sprites, animations, now_ms, layer='entity')
-        self._queue_one_entity(player, cam, culling, sprites, animations, now_ms, layer='player')
+        players.sort(key=lambda e: e.world_y)
+        for entity in players:
+            self._queue_one_entity(entity, cam, culling, sprites, animations, now_ms, layer='player')
 
     def _queue_one_entity(self, entity, cam, culling, sprites, animations, now_ms, *, layer: str) -> None:
         proto = entity.prototype

@@ -64,6 +64,7 @@ class HudOverlay:
     def render_base(self) -> None:
         self._draw_hud()
         self._draw_minimap()
+        self._draw_player_health()
 
     def render_cursor(self) -> None:
         self._draw_hover_tooltip()
@@ -95,6 +96,31 @@ class HudOverlay:
             game.screen.camera.offset,
             center,
         )
+
+    def _draw_player_health(self) -> None:
+        # the player's own health, bottom-center: a green fill over a red
+        # background, with the numeric value. always visible.
+        game = self.game
+        player = game.world.get_player()
+        if player.health is None:
+            return
+        surf = game.screen.surface
+        w, h = 260, 20
+        x = (game.screen.width - w) // 2
+        y = game.screen.height - h - 14
+        frac = max(0.0, player.health / player.max_health)
+        pg.draw.rect(surf, (0, 0, 0), (x - 2, y - 2, w + 4, h + 4))
+        pg.draw.rect(surf, (150, 40, 40), (x, y, w, h))
+        if frac > 0:
+            pg.draw.rect(surf, (70, 200, 80), (x, y, int(w * frac), h))
+        pg.draw.rect(surf, (235, 235, 235), (x, y, w, h), width=1)
+        text = f'{player.health}/{player.max_health}'
+        label = game.hud.font.render(text, True, (245, 245, 245))
+        shadow = game.hud.font.render(text, True, (0, 0, 0))
+        lx = x + (w - label.get_width()) // 2
+        ly = y + (h - label.get_height()) // 2
+        surf.blit(shadow, (lx + 1, ly + 1))
+        surf.blit(label, (lx, ly))
 
     def _hovered_item_proto(self):
         # find the item under the cursor across inventory, factory panel, and

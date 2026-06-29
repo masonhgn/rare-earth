@@ -1,0 +1,27 @@
+# fly.io deploy for the rare-earth server (raw TCP).
+#
+# IMPORTANT: raw TCP needs a DEDICATED IPv4 (shared IPv4 is HTTP/TLS only):
+#   fly volumes create rare_earth_data --size 1 -r <region>
+#   fly ips allocate-v4            # small monthly cost
+#   fly deploy
+# then players connect to that dedicated IP : 5555.
+
+app = "rare-earth-server"      # change to your app name (must be globally unique)
+primary_region = "iad"         # pick a region near you + your friends
+
+[build]
+
+# persistent world save (mounted at /data, matches RARE_EARTH_SAVE in the Dockerfile)
+[mounts]
+  source = "rare_earth_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 5555
+  # keep the server always-on (don't auto-stop an idle game server)
+  auto_stop_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 5555

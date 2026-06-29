@@ -95,7 +95,7 @@ def _resolve_overlap(world, a, b) -> None:
     else:
         dxa, dya = 0.0, (oy if ra.centery >= rb.centery else -oy)
     # (dxa, dya) moves `a` away from `b`; negated moves `b` away from `a`.
-    if a.id == 'player':
+    if a.is_player:
         if not _try_shift(world, b, -dxa, -dya):
             _try_shift(world, a, dxa, dya)
     else:
@@ -199,17 +199,20 @@ def update_player_animation(player, dx: float, dy: float) -> None:
             player.anim.set_state('walking_up')
 
 
-def clamp_player_to_bounds(world) -> None:
-    # keep the player's *hitbox* inside the map rectangle. clamping the full
-    # 128x128 sprite frame would stop the player ~40px before the visible
-    # body actually reaches the edge, since most of the frame is transparent
-    # padding. hitbox math matches Entity.hitbox_rect().
-    player = world.get_player()
-    sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    hitbox_w, hitbox_h = player.prototype.hitbox or (sprite_w, sprite_h)
+def clamp_to_bounds(world, entity) -> None:
+    # keep an entity's *hitbox* inside the map rectangle. clamping the full
+    # 128x128 sprite frame would stop it ~40px before the visible body reaches
+    # the edge (most of the frame is transparent padding). matches hitbox_rect.
+    sprite_w, sprite_h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+    hitbox_w, hitbox_h = entity.prototype.hitbox or (sprite_w, sprite_h)
     hx_off = (sprite_w - hitbox_w) / 2
     hy_off = sprite_h - hitbox_h
     map_w = world.width * TILE_LENGTH
     map_h = world.height * TILE_LENGTH
-    player.world_x = max(-hx_off, min(player.world_x, map_w - hx_off - hitbox_w))
-    player.world_y = max(-hy_off, min(player.world_y, map_h - hy_off - hitbox_h))
+    entity.world_x = max(-hx_off, min(entity.world_x, map_w - hx_off - hitbox_w))
+    entity.world_y = max(-hy_off, min(entity.world_y, map_h - hy_off - hitbox_h))
+
+
+def clamp_player_to_bounds(world) -> None:
+    # client convenience: clamp the local player.
+    clamp_to_bounds(world, world.get_player())

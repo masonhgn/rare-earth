@@ -3,6 +3,8 @@
     "tile_locked": false,
     "editable": false,
     "speed": 400,
+    "max_health": 30,
+    "is_player": true,
     "animation": {
         "default_state": "idle",
         "states": {

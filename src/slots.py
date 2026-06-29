@@ -93,6 +93,31 @@ def take(slots: list, item_id: str, qty: int) -> bool:
 COIN = 'coin'
 
 
+def click(slots: list, idx, held: dict | None, take_only: bool = False) -> dict | None:
+    # pick / place / merge / swap for one slot click. mutates `slots` in place,
+    # returns the new held stack. mirrors ui.SlotGrid.handle_click so the
+    # authoritative server can run inventory drag-drop without the UI widget.
+    if idx is None or idx < 0 or idx >= len(slots):
+        return held
+    if take_only and held is not None:
+        return held
+    slot = slots[idx]
+    if held is None:
+        if slot is None:
+            return None
+        slots[idx] = None
+        return slot
+    if slot is None or slot['item_id'] == held['item_id']:
+        if slot is None:
+            slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
+        else:
+            slot['quantity'] += held['quantity']
+        return None
+    new_held = slot
+    slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
+    return new_held
+
+
 def coin_count(inventory) -> int:
     return count(inventory.slots, COIN)
 

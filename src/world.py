@@ -192,7 +192,15 @@ class World:
         self.add_entity(Entity(proto, PLAYER_SPAWN, entity_id='player'))
 
     def get_player(self) -> Entity:
+        # the local/controlling player. single-player today; on the shared
+        # server this becomes per-connection — callers that mean "any player"
+        # should use players() instead of assuming a single one.
         return self.entities['player']
+
+    def players(self) -> list:
+        # all player entities (carry the 'player' component). server-side this
+        # is the player registry; client-side it's just the local player.
+        return [e for e in self.entities.values() if 'player' in e.components]
 
     def entities_with(self, component: str):
         # iterate entities carrying the named component. avoids the

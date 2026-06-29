@@ -6,6 +6,7 @@ import uuid
 import pygame as pg
 from config import TILE_LENGTH
 from animation import AnimationState
+from inventory_data import PlayerInventory
 
 
 class Entity:
@@ -31,6 +32,13 @@ class Entity:
         # each frame by movement.apply_knockback. not serialized.
         self.knockback_x = 0.0
         self.knockback_y = 0.0
+
+        # health: current hp, plus when it last changed (drives the over-head
+        # bar's 6s auto-hide). max comes from the prototype; None => not a
+        # living/damageable entity. not serialized — resets to full on load.
+        self.max_health = prototype.max_health
+        self.health = prototype.max_health
+        self.last_damage_ms = None   # None = never damaged (no bar shown yet)
 
         # per-entity component states keyed by name. each system that
         # ticks entities (FactorySystem, ContractSystem) iterates entities
@@ -63,6 +71,14 @@ class Entity:
                 'wander_pause': 0.0,     # idle seconds between strolls
                 'attack_cd': 0.0,        # seconds until next melee swing
             }
+        if prototype.is_player:
+            # per-player state on the 'player' component. `inventory` is the
+            # headless authoritative item store (the client renders it via the
+            # Inventory *view*); `held_item` is the drag cursor (per-player).
+            self.components['player'] = {
+                'inventory': PlayerInventory(),
+                'held_item': None,
+            }
 
     @property
     def machine_state(self) -> dict | None:
@@ -72,6 +88,26 @@ class Entity:
     @property
     def exchange_state(self) -> dict | None:
         return self.components.get('exchange')
+
+    @property
+    def is_player(self) -> bool:
+        # role check that replaces the old hardcoded `id == 'player'` tests.
+        return 'player' in self.components
+
+    @property
+    def inventory(self):
+        # the player's PlayerInventory item store, or None for non-players.
+        p = self.components.get('player')
+        return p['inventory'] if p else None
+
+    @property
+    def held_item(self):
+        p = self.components.get('player')
+        return p['held_item'] if p else None
+
+    @held_item.setter
+    def held_item(self, value) -> None:
+        self.components['player']['held_item'] = value
 
     def move_continuous(self, dx: float, dy: float) -> None:
         if self.prototype.tile_locked:

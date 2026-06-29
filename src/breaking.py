@@ -120,10 +120,13 @@ def spawn_dust_puff(world_pos: tuple[float, float], now_ms: int, count: int = 6)
 
 
 class BreakSystem:
-    def __init__(self, world, camera, minimap):
+    def __init__(self, world, on_tile_changed=None):
+        # on_tile_changed(tx, ty) fires when an overlay tile is cleared (mined)
+        # so the client can refresh its minimap. None on a headless server
+        # (which will turn it into a net event instead). render methods take
+        # the camera as a parameter, so the sim part needs no camera/minimap.
         self.world = world
-        self.camera = camera
-        self.minimap = minimap
+        self.on_tile_changed = on_tile_changed
 
         self.breaking: BreakState | None = None
         self.particles: list[Particle] = []
@@ -269,7 +272,8 @@ class BreakSystem:
         except FileNotFoundError:
             return
         self.world.overlay_grid[ty][tx] = None
-        self.minimap.update_cell(tx, ty)
+        if self.on_tile_changed is not None:
+            self.on_tile_changed(tx, ty)
         self._distribute_drops(roll_drops(proto.drops), world_pos)
 
     def _distribute_drops(self, drops: list[tuple[str, int]], world_pos: tuple[float, float]) -> None:

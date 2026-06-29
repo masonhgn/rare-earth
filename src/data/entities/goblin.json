@@ -3,9 +3,11 @@
     "tile_locked": false,
     "editable": false,
     "speed": 150,
+    "max_health": 20,
     "shadow": true,
     "sprite_size": [128, 128],
     "hitbox": [48, 80],
+    "drops": [{"item": "coin", "quantity": [2, 5]}],
     "animation": {
         "default_state": "idle",
         "states": {

@@ -182,9 +182,9 @@ def _on_left_click(game, event) -> None:
     #   5. world click for walk/break/open
     mx, my = event.pos
 
-    # the full-screen map swallows all clicks while open (it has no clickable
-    # elements; this just stops click-to-walk from firing behind it).
-    if game.map_view.open:
+    # swallow clicks during the death screen and while the full-screen map is
+    # open (neither should pass a click through to the world).
+    if game.dying or game.map_view.open:
         return
 
     # hud tabs sit on top and take priority over modal-outside-dismiss

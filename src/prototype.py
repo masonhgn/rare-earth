@@ -87,10 +87,19 @@ class EntityPrototype:
     # leave None for non-interactable entities (rocks, trees, ore).
     interactable: Optional[str] = None
 
-    # optional mob spec: {"aggro_radius","deaggro_radius","attack_radius",
-    # "attack_cooldown","wander_speed","hostile"}. when set, Entity gets a
-    # 'mob' component and MobSystem drives wander/chase/attack each frame.
-    # movable mobs also set tile_locked=False + a top-level `speed` (chase).
+    # max health for living entities (player, mobs). None => not damageable
+    # (terrain, buildings, ore). current hp is tracked per-instance on Entity.
+    max_health: Optional[int] = None
+
+    # marks the controllable player prototype. Entity gives it a 'player'
+    # component so world.players() can enumerate all player entities (the
+    # registry the shared server needs once there are many players).
+    is_player: bool = False
+
+    # optional mob spec: {"aggro_radius","deaggro_radius","wander_speed",
+    # "hostile","attack_range","attack_period"}. when set, Entity gets a 'mob'
+    # component and MobSystem drives wander/chase/attack each frame. movable
+    # mobs also set tile_locked=False + a top-level `speed` (chase speed).
     mob: Optional[dict] = None
 
 

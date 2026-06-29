@@ -45,6 +45,9 @@ SCHEMA_VERSION = 4
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAVE_DIR = os.path.join(_PROJECT_ROOT, 'saves')
 SAVE_PATH = os.path.join(SAVE_DIR, 'save.json')
+# the shared multiplayer world persists separately from single-player saves.
+# RARE_EARTH_SAVE lets a cloud deploy point this at a mounted persistent volume.
+SERVER_SAVE_PATH = os.environ.get('RARE_EARTH_SAVE', os.path.join(SAVE_DIR, 'server.json'))
 
 
 def save_exists(path: str = SAVE_PATH) -> bool:
@@ -285,7 +288,8 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
 
     # restore inventory slots. copy each dict so save/runtime references
     # don't alias.
-    g.inventory.slots = [
+    # inventory data lives on the local player's 'player' component now.
+    g.world.get_player().inventory.slots = [
         None if s is None else dict(s)
         for s in data['inventory_slots']
     ]
@@ -307,6 +311,101 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
     # session-local and not persisted).
     g.spot_market.seed_history()
 
+    return True
+
+
+# ---------------------------------------------------------------------------
+# server world persistence (no player / inventory — players are per-connection
+# with no accounts yet, so only the shared world is saved)
+# ---------------------------------------------------------------------------
+
+def save_world(sim, path: str = SERVER_SAVE_PATH) -> None:
+    # persist the shared world: grids, placed entities (skipping players),
+    # dropped items, spot prices, day clock. mirrors save_game minus the
+    # player position + inventory, and reuses the same component codecs.
+    w = sim.world
+    now_ms = pg.time.get_ticks()
+    saved_entities = []
+    for ent in w.entities.values():
+        if ent.is_player:
+            continue
+        saved_entities.append({
+            'id': ent.id,
+            'prototype_id': ent.prototype.proto_id,
+            'world_x': ent.world_x,
+            'world_y': ent.world_y,
+            'components': _serialize_components(ent, now_ms),
+        })
+    data = {
+        'version': SCHEMA_VERSION,
+        'day_elapsed': sim.day_clock.elapsed,
+        'spot_prices': dict(sim.spot_market.prices),
+        'world': {
+            'width': w.width,
+            'height': w.height,
+            'map_grid': _rle_encode(w.map_grid),
+            'overlay_grid': _rle_encode(w.overlay_grid),
+            'entities': saved_entities,
+            'dropped': [
+                {'item_id': d.item_id, 'quantity': d.quantity,
+                 'world_x': d.world_x, 'world_y': d.world_y}
+                for d in w.dropped
+            ],
+        },
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with gzip.open(tmp, 'wt', encoding='utf-8') as f:
+        json.dump(data, f, separators=(',', ':'))
+    os.replace(tmp, path)
+
+
+def load_world(sim, path: str = SERVER_SAVE_PATH) -> bool:
+    # rebuild sim.world from a save_world file (no player spawned). returns
+    # False if there's no save, it's unreadable/corrupt, or the version can't
+    # migrate — in every failure case the caller falls back to a fresh seed.
+    if not save_exists(path):
+        return False
+    try:
+        raw = _read_save(path)
+    except Exception as exc:
+        print(f'[server] save unreadable ({exc}); backing it up and starting fresh')
+        _backup_save(path, 'corrupt')
+        return False
+    data = _migrate_forward(raw, path)
+    if data is None:
+        return False
+
+    w = sim.world
+    wd = data['world']
+    w.width = wd['width']
+    w.height = wd['height']
+    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
+    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
+    w.entities.clear()
+    w.tile_index.clear()
+    w.dropped.clear()
+    w.spatial_grid.clear()
+
+    now_ms = pg.time.get_ticks()
+    for e_data in wd['entities']:
+        proto = load_prototype(e_data['prototype_id'])
+        ent = Entity(proto, (e_data['world_x'], e_data['world_y']), entity_id=e_data['id'])
+        _apply_components(ent, e_data.get('components', {}), now_ms)
+        w.add_entity(ent)
+    for d in wd['dropped']:
+        w.dropped.append(DroppedItem(
+            item_id=d['item_id'], quantity=d['quantity'],
+            world_x=d['world_x'], world_y=d['world_y']))
+    w._rebuild_grid()
+
+    sim.day_clock = DayClock(elapsed=data['day_elapsed'])   # caller re-binds on_rollover
+    saved_prices = data.get('spot_prices', {})
+    for item_id in sim.spot_market.prices.keys():
+        if item_id in saved_prices:
+            sim.spot_market.prices[item_id] = saved_prices[item_id]
+    sim.spot_market._tick_clock = 0.0
+    sim.spot_market.seed_history()
     return True
 
 

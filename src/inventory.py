@@ -26,8 +26,12 @@ import slots as slot_ops
 
 
 class Inventory:
-    def __init__(self):
-        self.slots: list[dict | None] = [None] * INVENTORY_SLOTS
+    # client-side VIEW over the local player's PlayerInventory (data). holds
+    # the panel UI; reads/writes slots through get_data() each access so it
+    # always targets the current local player — no stale references across
+    # respawn/load. the authoritative slots live on the 'player' component.
+    def __init__(self, get_data):
+        self._get_data = get_data
         self.open = False
         self.panel_image = load_image(INVENTORY_UI_FILE)
         self.rect = self.panel_image.get_rect(topleft=(0, 0))
@@ -42,6 +46,15 @@ class Inventory:
             slot_gap=2, font=self.font, draw_cells=False,
             icon_size=INVENTORY_ICON_SIZE,
         )
+
+    # --- data proxy (to the local player's PlayerInventory) ---
+
+    @property
+    def slots(self) -> list:
+        return self._get_data().slots
+
+    def add_item(self, item_id: str, quantity: int) -> int:
+        return self._get_data().add_item(item_id, quantity)
 
     def toggle(self) -> None:
         self.open = not self.open
@@ -59,13 +72,6 @@ class Inventory:
     def slot_at_pixel(self, mouse_pos: tuple[int, int]) -> int | None:
         self._sync_grid()
         return self.grid.slot_at_pixel(mouse_pos)
-
-    # --- mutation ---
-
-    def add_item(self, item_id: str, quantity: int) -> int:
-        # shared slot logic — returns leftover that didn't fit (>0 only
-        # when slots are full of mismatched items).
-        return slot_ops.add(self.slots, item_id, quantity)
 
     # --- mouse drag/drop ---
 
