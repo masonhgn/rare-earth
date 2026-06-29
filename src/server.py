@@ -100,10 +100,16 @@ class GameServer:
         self._elapsed = 0.0   # accumulated sim seconds (drives death/respawn timing)
         self._overlay_changes: list = []   # (tx, ty) ore tiles cleared since last broadcast
         self._save_accum = 0.0   # seconds since the last autosave
+        self.max_players = int(os.environ.get('MAX_PLAYERS', '16'))
 
     # --- per-connection lifecycle ---
 
     async def handle_client(self, reader, writer) -> None:
+        # refuse new players past the cap — each connection is a player entity in
+        # the world, so an unbounded flood would exhaust the sim.
+        if len(self.conns) >= self.max_players:
+            writer.close()
+            return
         pid = f'player_{self._next_id}'
         self._next_id += 1
         self.sim.world.add_entity(

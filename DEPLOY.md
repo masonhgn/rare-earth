@@ -105,6 +105,52 @@ Then: title screen -> set **Server address** to `IP:5555` -> **Multiplayer**.
 
 ---
 
+## D. Securing the server
+
+A fresh droplet has no firewall, so `5555` is already reachable — the job is to
+**close everything else** and gate the game.
+
+**1. Firewall — allow only SSH + the game port:**
+
+```bash
+ufw allow OpenSSH          # SSH (22) — don't lock yourself out
+ufw allow 5555/tcp         # the game port
+ufw --force enable
+ufw status
+```
+
+(If you attached a **DO Cloud Firewall** in the control panel, add an inbound
+TCP 5555 rule there too.)
+
+**2. Lock down SSH** (the real attack surface — not the game port):
+
+```bash
+apt install -y fail2ban                 # throttles SSH brute-force
+# use an SSH key, then in /etc/ssh/sshd_config set:  PasswordAuthentication no
+# then: systemctl restart ssh           (confirm your key works first!)
+```
+
+**3. Run the game as a non-root user** so a server bug can't own the box:
+
+```bash
+adduser --system --group rare
+# place the repo where 'rare' can read it, and set User=rare in the systemd unit.
+```
+
+**4. Player cap** (optional env var on the server, e.g. in the systemd unit's
+`[Service]` section):
+
+```ini
+Environment=MAX_PLAYERS=16    # cap concurrent connections (default 16)
+```
+
+The server validates every packet and drops slow/over-cap clients, so a stranger
+who finds the IP **can't crash or flood it**. There's no join password, though —
+anyone who knows `IP:5555` can connect as a player, so keep the address to your
+friends.
+
+---
+
 ## Notes
 
 - **Keep client and server in sync.** The wire protocol must match — have
