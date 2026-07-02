@@ -28,11 +28,13 @@
 import gzip
 import json
 import os
+import re
 from itertools import chain, groupby
 
 import pygame as pg
 
 from clock import DayClock
+from config import DAY_LENGTH_SEC
 from entity import Entity
 from item import DroppedItem
 from prototype import load_prototype
@@ -45,6 +47,9 @@ SCHEMA_VERSION = 5
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAVE_DIR = os.path.join(_PROJECT_ROOT, 'saves')
 SAVE_PATH = os.path.join(SAVE_DIR, 'save.json')
+# named single-player worlds each get their own file here, so the world-select
+# screen can list / load / delete them independently of the legacy SAVE_PATH.
+WORLDS_DIR = os.path.join(SAVE_DIR, 'worlds')
 # the shared multiplayer world persists separately from single-player saves.
 # RARE_EARTH_SAVE lets a cloud deploy point this at a mounted persistent volume.
 SERVER_SAVE_PATH = os.environ.get('RARE_EARTH_SAVE', os.path.join(SAVE_DIR, 'server.json'))
@@ -52,6 +57,55 @@ SERVER_SAVE_PATH = os.environ.get('RARE_EARTH_SAVE', os.path.join(SAVE_DIR, 'ser
 
 def save_exists(path: str = SAVE_PATH) -> bool:
     return os.path.isfile(path)
+
+
+# ---------------------------------------------------------------------------
+# named single-player world slots (world-select screen)
+# ---------------------------------------------------------------------------
+
+def _slugify(name: str) -> str:
+    # filesystem-safe stem from a display name. collapses runs of non
+    # [a-z0-9_-] to a single underscore; falls back to 'world' if empty.
+    slug = re.sub(r'[^a-z0-9_-]+', '_', name.strip().lower()).strip('_')
+    return slug or 'world'
+
+
+def world_path(name: str) -> str:
+    # path a new world with this display name saves to. a brand-new world's
+    # file doesn't exist yet, so callers treat "path missing" as "seed fresh".
+    return os.path.join(WORLDS_DIR, _slugify(name) + '.json')
+
+
+def list_worlds() -> list[dict]:
+    # metadata for every saved world, newest-played first. each entry:
+    #   {'path', 'name' (display), 'day' (in-game day number), 'mtime'}.
+    # unreadable/corrupt files are skipped rather than crashing the menu.
+    out: list[dict] = []
+    if not os.path.isdir(WORLDS_DIR):
+        return out
+    for fn in os.listdir(WORLDS_DIR):
+        if not fn.endswith('.json'):
+            continue
+        path = os.path.join(WORLDS_DIR, fn)
+        try:
+            data = _read_save(path)
+        except Exception:
+            continue
+        out.append({
+            'path': path,
+            'name': data.get('name', fn[:-5]),
+            'day': int(data.get('day_elapsed', 0) // DAY_LENGTH_SEC) + 1,
+            'mtime': os.path.getmtime(path),
+        })
+    out.sort(key=lambda wm: wm['mtime'], reverse=True)
+    return out
+
+
+def delete_world(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +142,12 @@ def _read_save(path: str) -> dict:
 # write
 # ---------------------------------------------------------------------------
 
-def save_game(g, path: str = SAVE_PATH) -> None:
+def save_game(g, path: str | None = None) -> None:
     # snapshot ordering matches the load path so a round-trip mirrors itself.
+    # path resolves to the game's chosen world slot (set by the world-select
+    # screen); falls back to the legacy single-slot SAVE_PATH when unset.
+    if path is None:
+        path = getattr(g, 'save_path', None) or SAVE_PATH
     w = g.world
     player = w.get_player()
     now_ms = pg.time.get_ticks()
@@ -108,6 +166,9 @@ def save_game(g, path: str = SAVE_PATH) -> None:
 
     data = {
         'version': SCHEMA_VERSION,
+        # display name for the world-select list; falls back to the file stem
+        # on load if a legacy save predates this field.
+        'name': getattr(g, 'world_name', None),
         'day_elapsed': g.day_clock.elapsed,
         # spot prices are tied to global game state, not per-exchange.
         # walked offsets aren't persisted — the post-load tick resumes
@@ -239,6 +300,10 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
 
     w = g.world
     wd = data['world']
+
+    # display name for the world-select list. older saves lack it; fall back
+    # to the file stem so the world still shows a sensible label.
+    g.world_name = data.get('name') or os.path.splitext(os.path.basename(path))[0]
 
     # wipe existing world contents before repopulating from the save.
     # width/height first — the RLE grid decode needs them to reshape rows.

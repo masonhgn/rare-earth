@@ -30,7 +30,7 @@ from display import DisplayService
 from spot_market import SpotMarket
 from contracts import ContractSystem
 from clock import DayClock
-from save_state import save_game, load_game
+from save_state import save_game, load_game, save_exists
 import movement
 import input_handler
 import worldgen
@@ -41,7 +41,14 @@ DEATH_SCREEN_SEC = 2.0
 
 
 class Game:
-    def __init__(self):
+    def __init__(self, save_path=None, world_name=None):
+        # save_path: the world slot to load from / autosave to (chosen on the
+        # world-select screen). when it doesn't exist yet, this is a new world:
+        # generate fresh + seed. world_name is the display label persisted in
+        # the save. both default to None for the legacy single-slot behavior.
+        self.save_path = save_path
+        self.world_name = world_name
+
         pg.init()
         pg.font.init()
         pg.display.set_caption(TITLE)
@@ -136,11 +143,12 @@ class Game:
         self.death_timer = 0.0
 
 
-        # restore prior session from disk if a save exists; otherwise
-        # seed the world with the default factory + starter drops.
-        if load_game(self):
-            # load_game replaces day_clock, so re-bind the rollover hook.
-            self.day_clock.on_rollover = self._on_day_rollover
+        # restore the chosen world slot if its file exists; otherwise it's a
+        # brand-new world, so seed the default factory + starter drops.
+        if self.save_path is not None and save_exists(self.save_path):
+            if load_game(self, self.save_path):
+                # load_game replaces day_clock, so re-bind the rollover hook.
+                self.day_clock.on_rollover = self._on_day_rollover
         else:
             self._seed_world()
         self._position_inventory()
