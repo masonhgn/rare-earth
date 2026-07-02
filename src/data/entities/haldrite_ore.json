@@ -1,0 +1,9 @@
+{
+    "grid": [["haldrite_ore"]],
+    "tile_locked": true,
+    "editable": true,
+    "break_time": 1.0,
+    "drops": [
+        {"item": "haldrite_ore", "quantity": [1, 2]}
+    ]
+}

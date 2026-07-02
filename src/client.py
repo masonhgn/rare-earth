@@ -343,6 +343,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
             elif event.type == pg.MOUSEWHEEL:
                 if exchange_panel.open:
                     exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
+                else:
+                    screen.zoom_by(event.y)
             elif event.type == pg.MOUSEBUTTONDOWN and event.button == 1:
                 pos = event.pos
                 lp = world.entities.get(local_id)
@@ -440,7 +442,10 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
 
         screen.clear()
         world_renderer.flush(screen.camera, screen.culling, None)
-        _draw_overhead_bars(screen.surface, world, screen.camera, local_id)
+        # over-head bars are world-space, so draw them onto the offscreen
+        # world surface and present (scale by zoom) before the native-res ui.
+        _draw_overhead_bars(screen.world_surface, world, screen.camera, local_id)
+        screen.present_world()
         if player is not None:
             sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
             minimap.render(

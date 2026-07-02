@@ -39,13 +39,28 @@ LAYERS = ['terrain', 'overlay', 'shadow', 'dropped', 'entity', 'player', 'highli
 # how long the yellow click marker stays visible (fades to 0 over this span)
 CLICK_MARKER_MS = 500
 
+# scroll-wheel zoom bounds + per-notch factor. zoom is a scale applied only
+# in the final present step (Screen renders the world 1:1 to an offscreen
+# surface, then scales it to the display), so >1 magnifies (zoom in) and <1
+# shows more world (zoom out). kept modest so pixel art stays legible.
+MIN_ZOOM = 0.5
+MAX_ZOOM = 2.5
+ZOOM_STEP = 1.1
+
 
 class Camera:
     # offset is the world-space position that maps to screen (0, 0).
     # follow recenters so the target sits at screen midpoint.
+    #
+    # screen_w/h are the *effective* viewport in world pixels (the offscreen
+    # world surface's size), which equals the display size divided by zoom.
+    # world_to_screen stays 1:1 because the world is drawn to that offscreen
+    # surface before zoom is applied; only screen_to_world (which takes real
+    # display/mouse coords) has to divide out the zoom.
     def __init__(self, screen_size: tuple[int, int] = (SCREEN_WIDTH, SCREEN_HEIGHT)):
         self.offset = pg.math.Vector2(0, 0)
         self.screen_w, self.screen_h = screen_size
+        self.zoom = 1.0
 
     def update_screen_size(self, w: int, h: int) -> None:
         self.screen_w, self.screen_h = w, h
@@ -63,7 +78,10 @@ class Camera:
         return (world_pos[0] - self.offset.x, world_pos[1] - self.offset.y)
 
     def screen_to_world(self, screen_pos: tuple[float, float]) -> tuple[float, float]:
-        return (screen_pos[0] + self.offset.x, screen_pos[1] + self.offset.y)
+        # screen_pos is a real display pixel (e.g. the mouse). undo the zoom
+        # scale to land back in the offscreen world surface, then add offset.
+        return (screen_pos[0] / self.zoom + self.offset.x,
+                screen_pos[1] / self.zoom + self.offset.y)
 
 
 class ViewFrustum:
@@ -154,15 +172,57 @@ class Screen:
         self.animations = AnimationLibrary(ANIMATIONS_FILE)
         self.animations.load()
 
-        self.camera = Camera((self.width, self.height))
-        self.culling = ViewFrustum(self.width, self.height)
-        self.renderer = Renderer(self.surface)
+        # scroll-wheel zoom. the world is drawn 1:1 into world_surface (sized
+        # to the effective viewport = display / zoom), then scaled onto the
+        # display in present_world(). the camera/culling/renderer all work in
+        # that offscreen space, so only the final present carries the zoom.
+        self.zoom = 1.0
+        self.world_surface = self._make_world_surface()
+        ew, eh = self.world_surface.get_size()
+        self.camera = Camera((ew, eh))
+        self.camera.zoom = self.zoom
+        self.culling = ViewFrustum(ew, eh)
+        self.renderer = Renderer(self.world_surface)
+
+    def _make_world_surface(self) -> pg.Surface:
+        # offscreen render target sized so that scaling it up by `zoom` fills
+        # the display. rounded to whole pixels; clamped to >=1 so a tiny window
+        # or extreme zoom can't produce a zero-size surface.
+        ew = max(1, round(self.width / self.zoom))
+        eh = max(1, round(self.height / self.zoom))
+        return pg.Surface((ew, eh)).convert()
+
+    def _sync_world_target(self) -> None:
+        # rebuild the offscreen world surface for the current size/zoom and
+        # repoint the camera, culling frustum, and renderer at its dimensions.
+        self.world_surface = self._make_world_surface()
+        ew, eh = self.world_surface.get_size()
+        self.camera.zoom = self.zoom
+        self.camera.update_screen_size(ew, eh)
+        self.culling.update_screen_size(ew, eh)
+        self.renderer.set_surface(self.world_surface)
+
+    def set_zoom(self, zoom: float) -> None:
+        z = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+        if abs(z - self.zoom) < 1e-6:
+            return
+        self.zoom = z
+        self._sync_world_target()
+
+    def zoom_by(self, notches: float) -> None:
+        # scroll-wheel handler: each notch multiplies zoom by ZOOM_STEP
+        # (event.y is +1 per notch up / -1 down; multi-notch scrolls compound).
+        if notches:
+            self.set_zoom(self.zoom * (ZOOM_STEP ** notches))
+
+    def present_world(self) -> None:
+        # scale the offscreen world onto the display. this is the single place
+        # zoom is applied; UI is drawn on self.surface afterward at native res.
+        pg.transform.scale(self.world_surface, (self.width, self.height), self.surface)
 
     def resize(self, width: int, height: int, display_mode: str = 'windowed') -> None:
         self._open_surface(width, height, display_mode)
-        self.camera.update_screen_size(self.width, self.height)
-        self.culling.update_screen_size(self.width, self.height)
-        self.renderer.set_surface(self.surface)
+        self._sync_world_target()
 
     def _open_surface(self, width: int, height: int, display_mode: str) -> None:
         if display_mode == 'fullscreen':
@@ -178,7 +238,9 @@ class Screen:
         self.width, self.height = self.surface.get_size()
 
     def clear(self, color=(170, 210, 240)) -> None:
-        self.surface.fill(color)
+        # clears the offscreen world surface (present_world then paints the
+        # whole display), so the sky color shows through beyond the map edge.
+        self.world_surface.fill(color)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +254,9 @@ MAP_TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
     'grass': (74, 122, 47),
     'coal_ore': (45, 45, 50),
     'copper_ore': (185, 100, 45),
+    'iron_ore': (200, 195, 188),
+    'silver_ore': (205, 212, 222),
+    'haldrite_ore': (150, 85, 205),
     'sand': (220, 195, 130),
     'dirt': (135, 95, 65),
     'stone': (140, 140, 150),
@@ -349,12 +414,13 @@ class MapView:
             self._dims = dims
 
     def render(self, target: pg.Surface, screen_size: tuple[int, int],
-               camera_offset: pg.math.Vector2) -> None:
+               camera) -> None:
         if not self.open:
             return
         self._ensure_surface()
         world = self.world
         sw, sh = screen_size
+        camera_offset = camera.offset
 
         # dim the world behind the map
         backdrop = pg.Surface((sw, sh), pg.SRCALPHA)
@@ -379,11 +445,13 @@ class MapView:
         def to_screen(wx, wy):
             return (ox + int(wx / TILE_LENGTH * ppt), oy + int(wy / TILE_LENGTH * ppt))
 
-        # current viewport rectangle, clipped to the map frame
+        # current viewport rectangle, clipped to the map frame. the visible
+        # world area is the camera's effective size (display / zoom), not the
+        # display size, so the box stays accurate as the player zooms.
         view = pg.Rect(
             *to_screen(camera_offset.x, camera_offset.y),
-            max(1, int((sw / TILE_LENGTH) * ppt)),
-            max(1, int((sh / TILE_LENGTH) * ppt)),
+            max(1, int((camera.screen_w / TILE_LENGTH) * ppt)),
+            max(1, int((camera.screen_h / TILE_LENGTH) * ppt)),
         ).clip(pg.Rect(ox, oy, dw, dh))
         if view.w > 0 and view.h > 0:
             pg.draw.rect(target, (255, 255, 255), view, width=2)

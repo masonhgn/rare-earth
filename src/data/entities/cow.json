@@ -1,0 +1,30 @@
+{
+    "grid": [["grass"]],
+    "tile_locked": false,
+    "editable": false,
+    "speed": 90,
+    "max_health": 15,
+    "shadow": true,
+    "sprite_size": [128, 128],
+    "hitbox": [64, 72],
+    "drops": [
+        {"item": "cowhide", "quantity": [1, 2]},
+        {"item": "raw_beef", "quantity": [1, 2]}
+    ],
+    "animation": {
+        "default_state": "idle",
+        "states": {
+            "idle": "cow_idle",
+            "walking_right": "cow_walking_right",
+            "walking_left": "cow_walking_left",
+            "walking_up": "cow_walking_back",
+            "walking_down": "cow_walking_front"
+        }
+    },
+    "mob": {
+        "aggro_radius": 0,
+        "deaggro_radius": 0,
+        "wander_speed": 40,
+        "hostile": false
+    }
+}

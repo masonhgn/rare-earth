@@ -1,0 +1,11 @@
+{
+    "id": "haldrite_bar",
+    "inputs": [
+        {"item": "haldrite_ore", "quantity": 2},
+        {"item": "coal", "quantity": 1}
+    ],
+    "outputs": [
+        {"item": "haldrite_bar", "quantity": 1}
+    ],
+    "duration": 4.5
+}

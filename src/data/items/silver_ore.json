@@ -1,0 +1,7 @@
+{
+    "id": "silver_ore",
+    "name": "Silver Ore",
+    "image": "src/data/sprites/items/silver_ore.png",
+    "icon_size": 36,
+    "spot_price": 14
+}

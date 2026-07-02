@@ -16,12 +16,28 @@
     },
     "files": {
         "tree": "src/data/sprites/tree.png",
+        "stone": {
+            "file": "src/data/sprites/tiles/stone_tile.png",
+            "size": [64, 64]
+        },
         "copper_ore": {
-            "file": "src/data/sprites/tiles/copper_ore.png",
+            "file": "src/data/sprites/tiles/copper_ore_tile.png",
             "size": [64, 64]
         },
         "coal_ore": {
-            "file": "src/data/sprites/tiles/coal_ore.png",
+            "file": "src/data/sprites/tiles/coal_ore_tile.png",
+            "size": [64, 64]
+        },
+        "iron_ore": {
+            "file": "src/data/sprites/tiles/iron_ore_tile.png",
+            "size": [64, 64]
+        },
+        "silver_ore": {
+            "file": "src/data/sprites/tiles/silver_ore_tile.png",
+            "size": [64, 64]
+        },
+        "haldrite_ore": {
+            "file": "src/data/sprites/tiles/haldrite_ore_tile.png",
             "size": [64, 64]
         },
         "factory": {

@@ -1,0 +1,7 @@
+{
+    "id": "iron_ore",
+    "name": "Iron Ore",
+    "image": "src/data/sprites/items/iron_ore.png",
+    "icon_size": 36,
+    "spot_price": 7
+}

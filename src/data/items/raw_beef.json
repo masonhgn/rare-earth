@@ -1,0 +1,6 @@
+{
+    "id": "raw_beef",
+    "name": "Raw Beef",
+    "image": "src/data/sprites/items/raw_beef.png",
+    "spot_price": 3
+}

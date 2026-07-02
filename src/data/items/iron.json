@@ -1,0 +1,6 @@
+{
+    "id": "iron",
+    "name": "Iron Bar",
+    "image": "src/data/sprites/items/iron.png",
+    "spot_price": 30
+}

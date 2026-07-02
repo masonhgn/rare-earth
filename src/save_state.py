@@ -38,7 +38,7 @@ from item import DroppedItem
 from prototype import load_prototype
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # saves live next to the project root, not inside src/. resolves relative
 # to this file so the path is stable regardless of cwd.
@@ -525,8 +525,62 @@ def _migrate_v3_to_v4(data: dict) -> dict:
     return data
 
 
+def _migrate_v4_to_v5(data: dict) -> dict:
+    # two one-time backfills for saves written before ore-on-stone + ambient
+    # mobs landed. both are idempotent-by-version (they run once, on the hop
+    # from v4 to v5), so a migrated world keeps whatever the player then does.
+    #
+    #  1. lay stone under (and in a 1-tile halo around) every existing ore
+    #     overlay cell, so deposits generated on the old grass base now read
+    #     as rocky outcrops like a freshly generated world.
+    #  2. spawn a few cows + ghosts near the saved player position — seed_world
+    #     places them in fresh worlds but never runs on load, so an existing
+    #     save has none. server saves carry no 'player', so they skip this.
+    ORES = {'coal_ore', 'copper_ore', 'iron_ore', 'silver_ore', 'haldrite_ore'}
+    world = data.get('world', {})
+    w, h = world.get('width', 0), world.get('height', 0)
+    if w and h and 'map_grid' in world and 'overlay_grid' in world:
+        base = _rle_decode(world['map_grid'], w, h)
+        overlay = _rle_decode(world['overlay_grid'], w, h)
+        for y in range(h):
+            orow = overlay[y]
+            for x in range(w):
+                if orow[x] in ORES:
+                    for ny in range(max(0, y - 1), min(h, y + 2)):
+                        brow = base[ny]
+                        for nx in range(max(0, x - 1), min(w, x + 2)):
+                            if brow[nx] == 'grass':
+                                brow[nx] = 'stone'
+        world['map_grid'] = _rle_encode(base)
+
+    player = data.get('player') or {}
+    px, py = player.get('world_x'), player.get('world_y')
+    if px is not None and py is not None:
+        ents = world.setdefault('entities', [])
+        # (prototype, dx, dy) pixel offsets around the player. an offset that
+        # happens to land in a solid (e.g. the factory) is harmless: mobs
+        # aren't tile-locked so add_entity accepts them, and separate_living
+        # shoves them clear on the first frame.
+        backfill = [
+            ('cow', 192, 0), ('cow', -192, 64), ('cow', 96, 224),
+            ('ghost', 0, -208), ('ghost', -176, -112), ('ghost', 240, 144),
+        ]
+        for i, (proto, dx, dy) in enumerate(backfill):
+            ents.append({
+                'id': f'{proto}_backfill_{i}',
+                'prototype_id': proto,
+                'world_x': px + dx,
+                'world_y': py + dy,
+                'components': {},
+            })
+
+    data['version'] = 5
+    return data
+
+
 MIGRATIONS = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
     3: _migrate_v3_to_v4,
+    4: _migrate_v4_to_v5,
 }

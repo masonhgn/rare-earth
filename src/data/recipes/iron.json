@@ -1,0 +1,11 @@
+{
+    "id": "iron",
+    "inputs": [
+        {"item": "iron_ore", "quantity": 2},
+        {"item": "coal", "quantity": 1}
+    ],
+    "outputs": [
+        {"item": "iron", "quantity": 1}
+    ],
+    "duration": 3.0
+}

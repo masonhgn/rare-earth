@@ -1,0 +1,29 @@
+{
+    "grid": [["grass"]],
+    "tile_locked": false,
+    "editable": false,
+    "speed": 130,
+    "max_health": 12,
+    "shadow": false,
+    "sprite_size": [128, 128],
+    "hitbox": [40, 72],
+    "drops": [{"item": "coin", "quantity": [3, 7]}],
+    "animation": {
+        "default_state": "idle",
+        "states": {
+            "idle": "ghost_idle",
+            "walking_right": "ghost_walking_right",
+            "walking_left": "ghost_walking_left",
+            "walking_up": "ghost_walking_back",
+            "walking_down": "ghost_walking_front"
+        }
+    },
+    "mob": {
+        "aggro_radius": 224,
+        "deaggro_radius": 416,
+        "wander_speed": 55,
+        "hostile": true,
+        "attack_range": 88,
+        "attack_period": 1.2
+    }
+}

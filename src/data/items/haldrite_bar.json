@@ -1,0 +1,6 @@
+{
+    "id": "haldrite_bar",
+    "name": "Haldrite Bar",
+    "image": "src/data/sprites/items/haldrite_bar.png",
+    "spot_price": 95
+}

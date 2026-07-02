@@ -45,12 +45,18 @@ class World:
         # patch counts scale with map area so ore density stays ~constant as the
         # map grows (the 60x60 baseline used 8 coal / 5 copper patches).
         area_scale = (WORLD_WIDTH * WORLD_HEIGHT) / (60 * 60)
+        # each ore patch lays a `rock` base under the ore cells it places, so
+        # ore only ever sits on stone, never bare grass (see _scatter_patch).
+        # rarer ores get fewer, smaller patches.
         self.generate_world_map(
             WORLD_WIDTH, WORLD_HEIGHT,
             base_tile='grass',
             patches=[
                 ('coal_ore', max(1, round(8 * area_scale)), 5),
                 ('copper_ore', max(1, round(5 * area_scale)), 4),
+                ('iron_ore', max(1, round(4 * area_scale)), 4),
+                ('silver_ore', max(1, round(2 * area_scale)), 3),
+                ('haldrite_ore', max(1, round(1 * area_scale)), 2),
             ],
         )
 
@@ -93,8 +99,20 @@ class World:
                 dist = (dx * dx + dy * dy) ** 0.5
                 if dist > radius:
                     continue
-                if random.random() < 1 - (dist / radius):
+                # a rocky outcrop: two independent falloff rolls so the deposit
+                # has soft edges. an ore cell ALWAYS gets stone beneath it (ore
+                # only ever sits on stone, never grass); bare stone fills in
+                # around the ore so the patch reads as a rock field with veins
+                # rather than ore floating on grass. the ore sprites are ~90%
+                # transparent, so the stone shows through prominently.
+                p = 1 - (dist / radius)
+                ore_here = random.random() < p
+                stone_here = random.random() < p
+                if ore_here:
                     self.overlay_grid[y][x] = tile_id
+                    self.map_grid[y][x] = 'stone'
+                elif stone_here:
+                    self.map_grid[y][x] = 'stone'
 
     def in_bounds_tile(self, tx: int, ty: int) -> bool:
         return 0 <= tx < self.width and 0 <= ty < self.height

@@ -129,9 +129,12 @@ def event_loop(game) -> None:
 
         elif event.type == pg.MOUSEWHEEL:
             # wheel scrolls the active exchange tab content (spot list,
-            # contracts list, drop-box slots) when the panel is open.
+            # contracts list, drop-box slots) when the panel is open;
+            # otherwise it zooms the world view in/out.
             if game.exchange_panel.open:
                 game.exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
+            else:
+                game.screen.zoom_by(event.y)
 
         elif event.type == pg.MOUSEMOTION:
             if game.held_item is not None:

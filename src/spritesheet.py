@@ -26,7 +26,7 @@
 #   },
 #   "files": {
 #     "tree": "src/data/sprites/tree.png",
-#     "copper_ore": {"file": "src/data/sprites/tiles/copper_ore.png", "size": [64, 64]}
+#     "copper_ore": {"file": "src/data/sprites/tiles/copper_ore_tile.png", "size": [64, 64]}
 #   }
 # }
 

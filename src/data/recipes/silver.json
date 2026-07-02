@@ -1,0 +1,11 @@
+{
+    "id": "silver",
+    "inputs": [
+        {"item": "silver_ore", "quantity": 2},
+        {"item": "coal", "quantity": 1}
+    ],
+    "outputs": [
+        {"item": "silver", "quantity": 1}
+    ],
+    "duration": 3.5
+}

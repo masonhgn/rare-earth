@@ -1,0 +1,6 @@
+{
+    "id": "cowhide",
+    "name": "Cowhide",
+    "image": "src/data/sprites/items/cowhide.png",
+    "spot_price": 4
+}

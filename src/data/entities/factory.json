@@ -9,6 +9,6 @@
     "machine": {
         "input_slots": 20,
         "output_slots": 20,
-        "recipes": ["copper_ingot"]
+        "recipes": ["copper_ingot", "iron", "silver", "haldrite_bar"]
     }
 }

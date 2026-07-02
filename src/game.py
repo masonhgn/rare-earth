@@ -448,19 +448,25 @@ class Game:
         culling = self.screen.culling
 
         # world layers + break visuals, queued and flushed in LAYERS order.
+        # everything world-space draws into the offscreen world surface (via
+        # the camera), which present_world() then scales onto the display by
+        # the zoom factor.
         self.click_marker = self.world_renderer.flush(cam, culling, self.click_marker)
         # combat overlays (over-head health bars + floating damage numbers)
-        # sit above the world but below the screen-space ui.
-        self.combat.render_world(self.screen.surface, cam, culling, pg.time.get_ticks())
+        # sit above the world but below the screen-space ui — so they scale
+        # with the world, they draw onto the world surface, not the display.
+        self.combat.render_world(self.screen.world_surface, cam, culling, pg.time.get_ticks())
+        # scale the zoomed world onto the display before the native-res ui.
+        self.screen.present_world()
 
-        # screen-space ui drawn directly on top of the flushed world.
+        # screen-space ui drawn directly on top of the presented world.
         self.hud_overlay.render_base()
         self.inventory.render(self.screen.surface)
         self.hud_tabs.render(self.screen.surface)
         self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
-        self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera.offset)
+        self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera)
         self.hud_overlay.render_cursor()
 
     def _render_death_screen(self) -> None:
