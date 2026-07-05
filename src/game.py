@@ -31,6 +31,7 @@ from display import DisplayService
 from spot_market import SpotMarket
 from contracts import ContractSystem, ensure_board
 from clock import DayClock
+from dev_console import DevConsole
 from save_state import save_game, load_game, save_exists
 import movement
 import input_handler
@@ -130,6 +131,14 @@ class Game:
         # build mode (toggled with G): left-click places the held item as a
         # tile-locked entity, and a green/red highlight tracks the hovered tile.
         self.build_mode = False
+
+        # developer console (backtick ` toggles it): dev-testing commands that
+        # mutate the local world directly. see the _cmd_* handlers below.
+        self.dev_console = DevConsole({
+            'tp': (self._cmd_teleport, 'tp <tileX> <tileY>'),
+            'teleport': (self._cmd_teleport, 'teleport <tileX> <tileY>'),
+            'help': (self._cmd_help, 'help'),
+        })
 
         # click marker: yellow X drawn at the click world pos, fading out
         # over a short window (handled by WorldRenderer). None when idle.
@@ -397,7 +406,7 @@ class Game:
         self.day_clock.tick(self.dt)
         self.spot_market.tick(self.dt)
         player = self.world.get_player()
-        dx, dy = input_handler.poll_movement(player, self.dt)
+        dx, dy = (0.0, 0.0) if self.dev_console.open else input_handler.poll_movement(player, self.dt)
         moved_dx = moved_dy = 0.0
         if dx or dy:
             # manual WASD preempts any active path. per-axis collision (solids
@@ -507,6 +516,7 @@ class Game:
         if self.build_mode:
             self._render_build_indicator()
         self.hud_overlay.render_cursor()
+        self.dev_console.render(self.screen.surface)
 
     def _render_build_highlight(self, cam) -> None:
         hud_render.draw_build_highlight(
@@ -518,3 +528,27 @@ class Game:
 
     def _render_death_screen(self) -> None:
         hud_render.draw_death_overlay(self.screen.surface, opaque=True)
+
+    # --- developer console commands (single-player; mutate the world directly) ---
+
+    def _cmd_teleport(self, args):
+        if len(args) != 2:
+            return 'usage: tp <tileX> <tileY>'
+        try:
+            tx, ty = int(args[0]), int(args[1])
+        except ValueError:
+            return 'tp: coordinates must be integers (tile units)'
+        if not self.world.in_bounds_tile(tx, ty):
+            return f'tp: ({tx}, {ty}) out of bounds (0..{self.world.width - 1}, 0..{self.world.height - 1})'
+        player = self.world.get_player()
+        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        # center the sprite on the target tile's center.
+        player.world_x = tx * TILE_LENGTH + TILE_LENGTH / 2 - sw / 2
+        player.world_y = ty * TILE_LENGTH + TILE_LENGTH / 2 - sh / 2
+        player.path = []
+        self.pending_action = None
+        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=(sw, sh))
+        return f'teleported to tile ({tx}, {ty})'
+
+    def _cmd_help(self, args):
+        return 'commands: ' + ', '.join(sorted(self.dev_console.commands))

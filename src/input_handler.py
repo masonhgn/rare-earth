@@ -125,7 +125,13 @@ def event_loop(game) -> None:
             game.running = False
 
         elif event.type == pg.KEYDOWN:
-            _on_keydown(game, event)
+            # the dev console captures all keys while open; backtick toggles it.
+            if game.dev_console.open:
+                game.dev_console.handle_key(event)
+            elif event.key == pg.K_BACKQUOTE:
+                game.dev_console.toggle()
+            else:
+                _on_keydown(game, event)
 
         elif event.type == pg.MOUSEBUTTONDOWN:
             if event.button == 1:
@@ -195,7 +201,7 @@ def _on_left_click(game, event) -> None:
 
     # swallow clicks during the death screen and while the full-screen map is
     # open (neither should pass a click through to the world).
-    if game.dying or game.map_view.open:
+    if game.dev_console.open or game.dying or game.map_view.open:
         return
 
     # hud tabs sit on top and take priority over modal-outside-dismiss
