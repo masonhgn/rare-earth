@@ -3,5 +3,6 @@
     "name": "Copper Ore",
     "image": "src/data/sprites/items/copper_ore.png",
     "icon_size": 36,
-    "spot_price": 5
+    "spot_price": 5,
+    "places": "copper_ore"
 }

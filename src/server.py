@@ -21,12 +21,14 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 import pygame as pg
 
-from config import PLAYER_SPAWN, PLAYER_ATTACK_RANGE, PLAYER_REACH_TILES, TILE_LENGTH
+from config import PLAYER_SPAWN, PLAYER_ATTACK_RANGE, TILE_LENGTH
 from simcore import SimCore
 from entity import Entity
 from prototype import load_prototype
-from world import tile_center, world_to_tile
-from item import roll_drops
+from world import tile_center, world_to_tile, in_reach
+from item import roll_drops, load_item
+from contracts import accept_contract, cancel_contract, ensure_board
+import interaction
 import movement
 import netproto
 import slots as slot_ops
@@ -37,11 +39,6 @@ PLAYER_ATTACK_CD = 0.4      # seconds between a player's melee swings
 DEATH_SCREEN_SEC = 2.0      # dead players freeze (hp 0) this long before respawn
 SAVE_INTERVAL = 60.0        # seconds between shared-world autosaves
 MAX_WRITE_BUFFER = 1 << 20  # drop a client whose unsent send buffer exceeds this (1 MB)
-
-
-def _center(e):
-    w, h = e.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    return (e.world_x + w / 2, e.world_y + h / 2)
 
 
 # --- intent input validation (clients are untrusted; reject malformed values
@@ -72,6 +69,7 @@ class Connection:
         self.move_dir = (0.0, 0.0)   # latest held WASD direction from this client
         self.pending_attack = None   # entity id this client wants to hit (one-shot)
         self.pending_break = None    # (tx, ty) tile this client wants to break (one-shot)
+        self.pending_place = None    # (tx, ty) tile to place the held item on (one-shot)
         self.pending_trade = None    # (side, item_id, qty) spot trade request (one-shot)
         self.actions = []              # ordered held-cursor actions this tick (inv/machine/drop)
         self.open_machine = None       # entity id of the machine this client has open
@@ -115,6 +113,8 @@ class GameServer:
         self.sim.world.add_entity(
             Entity(load_prototype('player'), PLAYER_SPAWN, entity_id=pid)
         )
+        # give the new player their own contract board (per-player ownership).
+        ensure_board(self.sim.world.entities[pid].exchange_state, self.sim.spot_market)
         conn = Connection(writer, pid)
         self.conns[id(writer)] = conn
         peer = writer.get_extra_info('peername')
@@ -142,6 +142,10 @@ class GameServer:
                     t = msg.get('tile')
                     if isinstance(t, list) and len(t) == 2 and _is_int(t[0]) and _is_int(t[1]):
                         conn.pending_break = (int(t[0]), int(t[1]))
+                elif mtype == 'place':
+                    t = msg.get('tile')
+                    if isinstance(t, list) and len(t) == 2 and _is_int(t[0]) and _is_int(t[1]):
+                        conn.pending_place = (int(t[0]), int(t[1]))
                 elif mtype == 'trade':
                     side, item, qty = msg.get('side'), msg.get('item'), msg.get('qty')
                     if side in ('sell', 'buy') and isinstance(item, str) and _is_int(qty):
@@ -153,6 +157,15 @@ class GameServer:
                     x, y = _finite(msg.get('x')), _finite(msg.get('y'))
                     if x is not None and y is not None:
                         conn.actions.append(('drop', x, y))
+                elif mtype == 'accept':
+                    if _is_int(msg.get('index')):
+                        conn.actions.append(('accept', int(msg['index'])))
+                elif mtype == 'cancel':
+                    if _is_int(msg.get('index')):
+                        conn.actions.append(('cancel', int(msg['index'])))
+                elif mtype == 'dropbox':
+                    if _is_int(msg.get('slot')):
+                        conn.actions.append(('dropbox', int(msg['slot'])))
                 elif mtype == 'machine_click':
                     kind = msg.get('kind')
                     if kind in ('input', 'output') and _is_int(msg.get('slot')):
@@ -167,7 +180,7 @@ class GameServer:
             self.conns.pop(id(writer), None)
             p = self.sim.world.entities.get(pid)
             if p is not None:
-                self._drop_player_goods(p)   # spill carried goods so a disconnect doesn't sink them
+                self._drop_player_goods(p, include_dropbox=True)   # spill goods + drop box so a disconnect doesn't sink them
             self.sim.world.remove_entity(pid)
             try:
                 writer.close()
@@ -208,7 +221,7 @@ class GameServer:
             if (p is None or target is None or target.health is None
                     or 'mob' not in target.components):
                 continue   # PvE only: targets must be mobs
-            (pcx, pcy), (tcx, tcy) = _center(p), _center(target)
+            (pcx, pcy), (tcx, tcy) = p.center, target.center
             if (pcx - tcx) ** 2 + (pcy - tcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2:
                 movement.knock_back(p, target)
                 self.sim.combat.hit(target, pg.time.get_ticks())
@@ -227,32 +240,60 @@ class GameServer:
             if p is None:
                 continue
             tx, ty = tile
-            pcx, pcy = _center(p)
-            ptx, pty = int(pcx // TILE_LENGTH), int(pcy // TILE_LENGTH)
-            if abs(tx - ptx) > PLAYER_REACH_TILES or abs(ty - pty) > PLAYER_REACH_TILES:
+            if not in_reach(p, tx, ty):
                 continue   # out of reach
             self._break_tile(tx, ty)
 
     def _break_tile(self, tx: int, ty: int) -> None:
         w = self.sim.world
-        ent = w.get_entity_at_tile(tx, ty)
-        if ent is not None and ent.prototype.editable:
-            for item_id, qty in w.break_entity(ent.id):
+        found = interaction.breakable_at(w, (tx, ty))
+        if found is None:
+            return
+        proto, entity_id = found
+        if entity_id is not None:
+            for item_id, qty in w.break_entity(entity_id):
                 w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
             return
-        overlay_id = w.overlay_at(tx, ty)
-        if overlay_id is None:
-            return
-        try:
-            proto = load_prototype(overlay_id)
-        except FileNotFoundError:
-            return
-        if not proto.editable:
-            return
+        # overlay ore: clear the tile, record the delta for the snapshot, drop.
         w.overlay_grid[ty][tx] = None
         self._overlay_changes.append((tx, ty))
         for item_id, qty in roll_drops(proto.drops):
             w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
+
+    def _process_places(self) -> None:
+        # build-mode placement: validate reach + emptiness + that the acting
+        # player's held item is placeable, then spawn the entity and consume one
+        # unit from held. the new entity rides out on the next snapshot; the
+        # decremented held rides back on the per-player inv message. the
+        # single-threaded tick serializes this, so two players racing for the
+        # same tile can't double-place (the loser's add_entity raises).
+        for conn in self.conns.values():
+            tile = conn.pending_place
+            conn.pending_place = None
+            if tile is None or conn.dead_until is not None:
+                continue
+            p = self.sim.world.entities.get(conn.player_id)
+            if p is None or p.held_item is None:
+                continue
+            proto = load_item(p.held_item['item_id'])
+            if proto.places is None:
+                continue
+            tx, ty = tile
+            if not self._placeable_here(p, tx, ty):
+                continue
+            entity = Entity(load_prototype(proto.places), (tx * TILE_LENGTH, ty * TILE_LENGTH))
+            try:
+                self.sim.world.add_entity(entity)
+            except ValueError:
+                continue   # lost the tile race this tick — keep the held stack
+            held = p.held_item
+            if held['quantity'] <= 1:
+                p.held_item = None
+            else:
+                p.held_item = {**held, 'quantity': held['quantity'] - 1}
+
+    def _placeable_here(self, p, tx: int, ty: int) -> bool:
+        return interaction.can_place(self.sim.world, p, (tx, ty), p.held_item)
 
     def _process_player_actions(self) -> None:
         # ordered held-cursor actions (inventory drag, machine in/out, drop) in
@@ -280,28 +321,32 @@ class GameServer:
                         p.held_item = slot_ops.click(ms['output_slots'], action[2], p.held_item, take_only=True)
                     else:
                         p.held_item = slot_ops.click(ms['input_slots'], action[2], p.held_item)
+                elif action[0] == 'accept':
+                    accept_contract(p.exchange_state, action[1], p.inventory, self.sim.day_clock.day)
+                elif action[0] == 'cancel':
+                    cancel_contract(p.exchange_state, action[1], p.inventory)
+                elif action[0] == 'dropbox':
+                    p.held_item = slot_ops.click(p.exchange_state['drop_box'], action[1], p.held_item)
 
     def _drop_held(self, p, x: float, y: float) -> None:
         if p.held_item is None:
             return
         tx, ty = world_to_tile((x, y))
-        pcx, pcy = _center(p)
-        ptx, pty = int(pcx // TILE_LENGTH), int(pcy // TILE_LENGTH)
-        if abs(tx - ptx) > PLAYER_REACH_TILES or abs(ty - pty) > PLAYER_REACH_TILES:
+        if not in_reach(p, tx, ty):
             return   # out of reach: keep holding it
         self.sim.world.spawn_dropped_item(p.held_item['item_id'], p.held_item['quantity'], (x, y))
         p.held_item = None
 
     def _machine_msg(self, machine_id):
-        # per-viewer machine state: slots + active recipe + how long it's been
-        # crafting (the client rebases started_ms onto its own clock so the
-        # progress bar keeps advancing smoothly between updates).
+        # per-viewer machine state: slots + active recipe + accumulated craft
+        # time (elapsed_ms). the client advances it locally between updates so
+        # the bar stays smooth, and each message re-syncs it to authoritative.
         ent = self.sim.world.entities.get(machine_id)
         if ent is None or 'machine' not in ent.components:
             return None
         ms = ent.components['machine']
         recipe = ms['current_recipe']
-        elapsed = (pg.time.get_ticks() - ms['started_ms']) if recipe else 0
+        elapsed = ms['elapsed_ms'] if recipe else 0
         return netproto.encode({
             'type': 'machine', 'id': machine_id,
             'input': ms['input_slots'], 'output': ms['output_slots'],
@@ -357,8 +402,11 @@ class GameServer:
                 self._respawn(p)
                 conn.dead_until = None
 
-    def _drop_player_goods(self, p) -> None:
+    def _drop_player_goods(self, p, include_dropbox: bool = False) -> None:
         # spill a player's inventory + held cursor onto the ground at their feet.
+        # on disconnect we also spill their drop box (include_dropbox=True) so
+        # staged deposits aren't silently lost when the per-connection player is
+        # removed; on death we keep the drop box (it's a bank-like staging area).
         sw, sh = p.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
         at = (p.world_x + sw / 2, p.world_y + sh / 2)
         for slot in p.inventory.slots:
@@ -366,6 +414,10 @@ class GameServer:
                 self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
         if p.held_item is not None:
             self.sim.world.spawn_dropped_item(p.held_item['item_id'], p.held_item['quantity'], at)
+        if include_dropbox and p.exchange_state is not None:
+            for slot in p.exchange_state['drop_box']:
+                if slot is not None:
+                    self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
 
     def _respawn(self, player) -> None:
         w = self.sim.world
@@ -398,6 +450,7 @@ class GameServer:
         self._process_breaks()
         self._process_trades()
         self._process_player_actions()
+        self._process_places()
         self._apply_move_intents(dt)
         self.sim.tick(dt)
         self._auto_pickup()
@@ -408,6 +461,7 @@ class GameServer:
             'dropped': netproto.dropped_snapshot(self.sim.world),
             'overlay': [list(t) for t in self._overlay_changes],   # cleared-tile deltas
             'prices': dict(self.sim.spot_market.prices),
+            'day_elapsed': self.sim.day_clock.elapsed,   # client derives the day number
         })
         self._overlay_changes.clear()
         for conn in list(self.conns.values()):
@@ -431,12 +485,16 @@ class GameServer:
             if p is not None:
                 # per-player inventory + held cursor (private to each client)
                 w.write(netproto.encode({'type': 'inv', 'slots': p.inventory.slots, 'held': p.held_item}))
+                # per-player forward-contract state (board / active / drop box)
+                w.write(netproto.encode({'type': 'exchange', 'state': p.exchange_state}))
             if conn.open_machine is not None:
                 mm = self._machine_msg(conn.open_machine)
                 if mm is not None:
                     w.write(mm)
+        except (ConnectionError, OSError):
+            pass   # client went away mid-send; its reader task runs cleanup
         except Exception:
-            pass
+            traceback.print_exc()   # a real bug (serialization, etc.) — log, don't swallow
 
     async def run(self, host: str = '127.0.0.1', port: int = 5555) -> None:
         srv = await asyncio.start_server(self.handle_client, host, port)

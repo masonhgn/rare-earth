@@ -51,32 +51,36 @@ class FactorySystem:
     def __init__(self, world):
         self.world = world
 
-    def tick(self) -> None:
-        now_ms = pg.time.get_ticks()
+    def tick(self, dt: float) -> None:
+        # dt-driven so craft progress is deterministic and boundary-clean:
+        # elapsed_ms is a plain accumulator (no absolute timestamps), so it
+        # serializes + networks as-is with no rebasing onto a wall clock.
+        dt_ms = dt * 1000.0
         for entity in self.world.entities_with('machine'):
             ms = entity.components['machine']
             if ms['current_recipe'] is None:
-                self._try_start_recipe(entity, ms, now_ms)
+                self._try_start_recipe(entity, ms)
             else:
-                self._maybe_finish_recipe(ms, now_ms)
+                self._advance_recipe(ms, dt_ms)
 
     # --- internals ---
 
-    def _try_start_recipe(self, entity, ms, now_ms: int) -> None:
+    def _try_start_recipe(self, entity, ms) -> None:
         for recipe_id in entity.prototype.machine.get('recipes', []):
             recipe = load_recipe(recipe_id)
             if _inputs_satisfied(ms['input_slots'], recipe.inputs):
                 _consume_inputs(ms['input_slots'], recipe.inputs)
                 ms['current_recipe'] = recipe_id
-                ms['started_ms'] = now_ms
+                ms['elapsed_ms'] = 0.0
                 return
 
-    def _maybe_finish_recipe(self, ms, now_ms: int) -> None:
+    def _advance_recipe(self, ms, dt_ms: float) -> None:
         recipe = load_recipe(ms['current_recipe'])
-        if now_ms - ms['started_ms'] < recipe.duration_ms:
+        ms['elapsed_ms'] += dt_ms
+        if ms['elapsed_ms'] < recipe.duration_ms:
             return
-        # ready to deposit; if outputs can't fit, leave the job done-but-pending
-        # so we don't lose the result.
+        # done; if outputs can't fit, leave it done-but-pending (elapsed stays
+        # past duration, bar shows full) so we don't lose the result.
         if not _outputs_fit(ms['output_slots'], recipe.outputs):
             return
         _deposit_outputs(ms['output_slots'], recipe.outputs)
@@ -237,8 +241,7 @@ class FactoryPanel:
         name_label = self.font.render(out_proto.name, True, (240, 240, 230))
         surface.blit(name_label, (name_x, name_y))
 
-        now_ms = pg.time.get_ticks()
-        progress = min(1.0, max(0.0, (now_ms - ms['started_ms']) / recipe.duration_ms))
+        progress = min(1.0, max(0.0, ms['elapsed_ms'] / recipe.duration_ms))
         bar_x = name_x
         bar_y = name_y + name_label.get_height() + 10
         bar_w = header_x + HEADER_RECT.width - 16 - bar_x

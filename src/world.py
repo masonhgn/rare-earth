@@ -35,29 +35,37 @@ def tile_center(tile: tuple[int, int]) -> tuple[float, float]:
             tile[1] * TILE_LENGTH + TILE_LENGTH / 2)
 
 
+def in_reach(player, tx: int, ty: int, max_dist: int = PLAYER_REACH_TILES) -> bool:
+    # is tile (tx, ty) within max_dist tiles of `player`'s visual-center tile?
+    # takes the player EXPLICITLY so it works for any player — the local one in
+    # single-player, a specific connection's player on the server, or the net
+    # client's own player. (World.tile_in_reach is the single-player wrapper
+    # that passes the fixed 'player' entity, which only exists in single-player.)
+    ptx, pty = player.center_tile
+    return abs(tx - ptx) <= max_dist and abs(ty - pty) <= max_dist
+
+
 class World:
     def __init__(self):
         self.map_grid: list[list[str]] = []
         self.width = 0
         self.height = 0
-        # base terrain is grass with scattered ore patches sprinkled over it.
-        # tweak counts/radii to taste; rarer ores should have fewer/smaller patches.
-        # patch counts scale with map area so ore density stays ~constant as the
-        # map grows (the 60x60 baseline used 8 coal / 5 copper patches).
+        # terrain is data-driven (data/worldgen.json): a base tile plus a list
+        # of {tile, count, radius} ore patches. patch counts scale with map area
+        # so ore density stays ~constant vs the 60x60 baseline. each ore patch
+        # lays stone under its cells so ore only ever sits on rock (see
+        # _scatter_patch). local import avoids a module-load cycle with worldgen.
+        from worldgen import load_worldgen_config
+        cfg = load_worldgen_config()
         area_scale = (WORLD_WIDTH * WORLD_HEIGHT) / (60 * 60)
-        # each ore patch lays a `rock` base under the ore cells it places, so
-        # ore only ever sits on stone, never bare grass (see _scatter_patch).
-        # rarer ores get fewer, smaller patches.
+        patches = [
+            (p['tile'], max(1, round(p['count'] * area_scale)), p['radius'])
+            for p in cfg.get('patches', [])
+        ]
         self.generate_world_map(
             WORLD_WIDTH, WORLD_HEIGHT,
-            base_tile='grass',
-            patches=[
-                ('coal_ore', max(1, round(8 * area_scale)), 5),
-                ('copper_ore', max(1, round(5 * area_scale)), 4),
-                ('iron_ore', max(1, round(4 * area_scale)), 4),
-                ('silver_ore', max(1, round(2 * area_scale)), 3),
-                ('haldrite_ore', max(1, round(1 * area_scale)), 2),
-            ],
+            base_tile=cfg.get('base_tile', 'grass'),
+            patches=patches,
         )
 
         self.entities: dict[str, Entity] = {}
@@ -161,18 +169,11 @@ class World:
         return self.overlay_grid[ty][tx]
 
     def tile_in_reach(self, tx: int, ty: int, max_dist: int = PLAYER_REACH_TILES) -> bool:
-        # measure reach from the player's *visual center*, not the sprite
-        # top-left. for a 128x128 player sprite at world_x=200, the body is
-        # centered around (264, 264) ≈ tile (4, 4), not (3, 3) as the raw
-        # world_x would suggest. callers can tighten via max_dist (e.g. 1
-        # for factory interaction, which only works when adjacent).
-        player = self.get_player()
-        sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        cx = player.world_x + sprite_w / 2
-        cy = player.world_y + sprite_h / 2
-        ptx = int(cx // TILE_LENGTH)
-        pty = int(cy // TILE_LENGTH)
-        return abs(tx - ptx) <= max_dist and abs(ty - pty) <= max_dist
+        # single-player convenience: reach measured from the fixed 'player'
+        # entity's visual center. multi-player callers use the module-level
+        # in_reach(player, ...) with their own player, since 'player' doesn't
+        # exist server-side (players are player_N) or client-side (local_id).
+        return in_reach(self.get_player(), tx, ty, max_dist)
 
     # --- entities ---
 

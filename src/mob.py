@@ -40,21 +40,12 @@ WANDER_TILE_RADIUS = 6
 WANDER_PAUSE_RANGE = (1.5, 4.0)
 
 
-def _center(entity) -> tuple[float, float]:
-    # visual center, accounting for oversized sprite frames (the goblin is
-    # 128x128 on a 64px tile, same as the player). using the center keeps
-    # aggro distance, the path's start tile, and follow_path's own centering
-    # all consistent with each other.
-    w, h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    return (entity.world_x + w / 2, entity.world_y + h / 2)
-
-
 def _nearest_player(players, x: float, y: float):
     # the player entity closest to (x, y) by squared center distance, or None.
     # a mob aggros/attacks its nearest player (shared server: many, or none).
     best, best_d = None, None
     for p in players:
-        px, py = _center(p)
+        px, py = p.center
         d = (px - x) ** 2 + (py - y) ** 2
         if best is None or d < best_d:
             best, best_d = p, d
@@ -74,12 +65,12 @@ class MobSystem:
             spec = mob.prototype.mob
             ms = mob.components['mob']
             ms['attack_cd'] = max(0.0, ms['attack_cd'] - dt)
-            mcx, mcy = _center(mob)
+            mcx, mcy = mob.center
 
             # target the nearest player (shared server: many players, or none).
             target = _nearest_player(players, mcx, mcy)
             if target is not None:
-                pcx, pcy = _center(target)
+                pcx, pcy = target.center
                 dist = math.hypot(pcx - mcx, pcy - mcy)
             else:
                 pcx = pcy = 0.0
@@ -152,7 +143,7 @@ class MobSystem:
             ms['wander_pause'] -= dt
             return (0.0, 0.0)
         if not mob.path:
-            mtx, mty = world_to_tile(_center(mob))
+            mtx, mty = world_to_tile(mob.center)
             r = WANDER_TILE_RADIUS
             target = self.world.nearest_walkable(
                 mtx + random.randint(-r, r), mty + random.randint(-r, r)

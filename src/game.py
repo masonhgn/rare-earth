@@ -13,7 +13,8 @@
 import pygame as pg
 
 from config import TILE_LENGTH, TITLE
-from world import World
+from world import World, world_to_tile
+from item import load_item
 from render import Screen, Minimap, WorldRenderer, MapView
 from inventory import Inventory
 from hud import Hud, HudOverlay
@@ -28,11 +29,12 @@ from settings_panel import SettingsPanel
 from hud_tabs import HudTabs
 from display import DisplayService
 from spot_market import SpotMarket
-from contracts import ContractSystem
+from contracts import ContractSystem, ensure_board
 from clock import DayClock
 from save_state import save_game, load_game, save_exists
 import movement
 import input_handler
+import hud_render
 import worldgen
 
 
@@ -96,7 +98,10 @@ class Game:
         self.day_clock.on_rollover = self._on_day_rollover
         # exchange panel (modal, three tabs). day_clock ref is needed at
         # accept-contract time to stamp due_day.
-        self.exchange_panel = ExchangePanel(self.spot_market, self.inventory, self.day_clock)
+        self.exchange_panel = ExchangePanel(
+            self.spot_market, self.inventory, self.day_clock,
+            get_exchange_state=lambda: self.world.get_player().exchange_state,
+        )
         # display facade: panel + hud_tabs go through this for screen
         # ops, so they don't need a full Game reference.
         self.display = DisplayService(self.settings, self.screen, self._position_inventory)
@@ -106,6 +111,7 @@ class Game:
             self.display,
             on_save=lambda: save_game(self),
             on_quit=self.stop,
+            on_title=self._back_to_title,
         )
         # hud tabs anchored to the right edge — quick toggles for the
         # inventory and the settings modal.
@@ -120,6 +126,10 @@ class Game:
         # ui state. held_item (the drag cursor) lives on the local player's
         # 'player' component now — see the Game.held_item property below.
         self.hover_pos: tuple[int, int] = (0, 0)
+
+        # build mode (toggled with G): left-click places the held item as a
+        # tile-locked entity, and a green/red highlight tracks the hovered tile.
+        self.build_mode = False
 
         # click marker: yellow X drawn at the click world pos, fading out
         # over a short window (handled by WorldRenderer). None when idle.
@@ -136,6 +146,9 @@ class Game:
         self.clock = pg.time.Clock()
         self.dt = 0.0
         self.running = False
+        # set by the settings "Back to Title" button so start() returns 'title'
+        # (vs quitting the whole program).
+        self.exit_to_title = False
 
         # death screen: on player death, hold a paused black "YOU DIED" screen
         # for DEATH_SCREEN_SEC, then respawn.
@@ -152,6 +165,10 @@ class Game:
         else:
             self._seed_world()
         self._position_inventory()
+        # make sure the player has a contract board. lazily generated from the
+        # spot market — a fresh world starts empty; a loaded/migrated save
+        # keeps whatever board it had.
+        ensure_board(self.world.get_player().exchange_state, self.spot_market)
 
     # --- per-player cursor: held_item lives on the local player's component ---
 
@@ -168,7 +185,7 @@ class Game:
     def _seed_world(self) -> None:
         # default world contents (factory, exchange, boards, a goblin, pickups),
         # shared with the headless server via worldgen so they can't drift.
-        worldgen.seed_world(self.world, self.spot_market)
+        worldgen.seed_world(self.world)
 
     def close_factory_panel(self) -> None:
         # closes the panel AND deposits any cursor-held item back into the
@@ -316,9 +333,9 @@ class Game:
 
     # --- main loop ---
 
-    def start(self) -> None:
+    def start(self) -> str | None:
         if self.running:
-            return
+            return None
         self.running = True
 
         while self.running:
@@ -339,9 +356,17 @@ class Game:
         self._deposit_held_item()
         save_game(self)
         save_settings({**self.settings, 'show_hud': self.hud.visible})
-        pg.quit()
+        # pygame stays initialized so the launcher can reuse the window + image
+        # caches across a title<->game bounce (main.py owns the final pg.quit()).
+        return 'title' if self.exit_to_title else None
 
     def stop(self) -> None:
+        self.running = False
+
+    def _back_to_title(self) -> None:
+        # leave the game and return to the main menu (vs stop(), which quits
+        # the program). start() saves as usual, then returns 'title'.
+        self.exit_to_title = True
         self.running = False
 
     # --- per-frame update ---
@@ -434,7 +459,7 @@ class Game:
         # break/drag-mining state machine + particle physics
         self.break_system.tick(self.dt)
         # advance any in-progress machine recipes
-        self.factory_system.tick()
+        self.factory_system.tick(self.dt)
         # advance mob ai (wander/chase) using the up-to-date player position
         self.mob_system.tick(self.dt)
         # age out floating damage numbers
@@ -464,6 +489,10 @@ class Game:
         # sit above the world but below the screen-space ui — so they scale
         # with the world, they draw onto the world surface, not the display.
         self.combat.render_world(self.screen.world_surface, cam, culling, pg.time.get_ticks())
+        # build-mode placement highlight sits on the world surface (so it scales
+        # with zoom), above the world but below the screen-space ui.
+        if self.build_mode:
+            self._render_build_highlight(cam)
         # scale the zoomed world onto the display before the native-res ui.
         self.screen.present_world()
 
@@ -475,11 +504,17 @@ class Game:
         self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera)
+        if self.build_mode:
+            self._render_build_indicator()
         self.hud_overlay.render_cursor()
 
+    def _render_build_highlight(self, cam) -> None:
+        hud_render.draw_build_highlight(
+            self.screen.world_surface, self.world, cam,
+            self.world.get_player(), self.held_item, self.hover_pos)
+
+    def _render_build_indicator(self) -> None:
+        hud_render.draw_build_indicator(self.screen.surface)
+
     def _render_death_screen(self) -> None:
-        # full black screen with big red YOU DIED text, held for DEATH_SCREEN_SEC.
-        surf = self.screen.surface
-        surf.fill((0, 0, 0))
-        label = get_font(72).render('YOU DIED', True, (170, 30, 30))
-        surf.blit(label, label.get_rect(center=(self.screen.width // 2, self.screen.height // 2)))
+        hud_render.draw_death_overlay(self.screen.surface, opaque=True)

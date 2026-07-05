@@ -5,8 +5,5 @@
     "solid": true,
     "footprint_size": [4, 4],
     "sprite_size": [256, 256],
-    "interactable": "exchange",
-    "exchange": {
-        "drop_box_slots": 30
-    }
+    "interactable": "exchange"
 }

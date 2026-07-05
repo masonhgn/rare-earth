@@ -6,10 +6,10 @@
 # runs this; the client (Game) renders + sends intents and will shed its own
 # copies of these systems as it becomes a thin client.
 #
-# NOTE: break/factory/combat/mob timing still reads pg.time.get_ticks(), so the
-# host must have called pygame.init() (no display needed). Phase 0 step #4 swaps
-# that for an explicit fixed-step server clock so the sim is deterministic and
-# can run without pygame at all.
+# NOTE: factory craft progress is now dt-accumulated (elapsed_ms), but break /
+# combat / mob cosmetic timing still reads pg.time.get_ticks(), so the host must
+# have called pygame.init() (no display needed). Fully replacing that with a
+# fixed-step clock (so the sim runs without pygame at all) is still deferred.
 
 import pygame as pg
 
@@ -47,7 +47,7 @@ class SimCore:
         self.contract_system.settle_day_rollover(new_day)
 
     def seed(self) -> None:
-        worldgen.seed_world(self.world, self.spot_market)
+        worldgen.seed_world(self.world)
 
     def save(self, path: str | None = None) -> None:
         save_state.save_world(self, path or save_state.SERVER_SAVE_PATH)
@@ -67,7 +67,7 @@ class SimCore:
         self.day_clock.tick(dt)
         self.spot_market.tick(dt)
         self.break_system.tick(dt)
-        self.factory_system.tick()
+        self.factory_system.tick(dt)
         self.mob_system.tick(dt)
         self.combat.tick(pg.time.get_ticks())
         # player death/respawn is paced by the server (it freezes dead players

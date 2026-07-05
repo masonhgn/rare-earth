@@ -14,6 +14,7 @@ import pygame as pg
 
 from item import roll_drops
 from ui_theme import get_font
+import hud_render
 
 
 # random damage dealt per landed hit (inclusive).
@@ -90,13 +91,7 @@ class CombatSystem:
             hb = ent.hitbox_rect()
             if not culling.point_visible((hb.x, hb.y), cam.offset, size=(hb.w, hb.h)):
                 continue
-            bx, by = cam.world_to_screen((hb.centerx - _BAR_W / 2, hb.top - 12))
-            bx, by = int(bx), int(by)
-            frac = max(0.0, ent.health / ent.max_health)
-            pg.draw.rect(surface, (20, 20, 24), (bx - 1, by - 1, _BAR_W + 2, _BAR_H + 2))
-            pg.draw.rect(surface, (150, 40, 40), (bx, by, _BAR_W, _BAR_H))
-            if frac > 0:
-                pg.draw.rect(surface, (70, 200, 80), (bx, by, int(_BAR_W * frac), _BAR_H))
+            hud_render.draw_overhead_bar(surface, cam, ent)
 
     def _render_damage_numbers(self, surface, cam, now_ms: int) -> None:
         font = get_font(20)

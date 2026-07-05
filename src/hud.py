@@ -8,6 +8,7 @@ import pygame as pg
 from config import TILE_LENGTH, DROPPED_ITEM_SIZE
 from item import load_item, format_quantity, get_item_icon
 from ui_theme import COLOR_SLOT_QTY_TEXT, get_font
+import hud_render
 
 
 class Hud:
@@ -98,29 +99,11 @@ class HudOverlay:
         )
 
     def _draw_player_health(self) -> None:
-        # the player's own health, bottom-center: a green fill over a red
-        # background, with the numeric value. always visible.
+        # the player's own health, bottom-center, with the numeric value.
         game = self.game
-        player = game.world.get_player()
-        if player.health is None:
-            return
-        surf = game.screen.surface
-        w, h = 260, 20
-        x = (game.screen.width - w) // 2
-        y = game.screen.height - h - 14
-        frac = max(0.0, player.health / player.max_health)
-        pg.draw.rect(surf, (0, 0, 0), (x - 2, y - 2, w + 4, h + 4))
-        pg.draw.rect(surf, (150, 40, 40), (x, y, w, h))
-        if frac > 0:
-            pg.draw.rect(surf, (70, 200, 80), (x, y, int(w * frac), h))
-        pg.draw.rect(surf, (235, 235, 235), (x, y, w, h), width=1)
-        text = f'{player.health}/{player.max_health}'
-        label = game.hud.font.render(text, True, (245, 245, 245))
-        shadow = game.hud.font.render(text, True, (0, 0, 0))
-        lx = x + (w - label.get_width()) // 2
-        ly = y + (h - label.get_height()) // 2
-        surf.blit(shadow, (lx + 1, ly + 1))
-        surf.blit(label, (lx, ly))
+        hud_render.draw_health_bar(
+            game.screen.surface, game.world.get_player(),
+            show_number=True, font=game.hud.font)
 
     def _hovered_item_proto(self):
         # find the item under the cursor across inventory, factory panel, and
@@ -173,16 +156,10 @@ class HudOverlay:
 
     def _draw_held_item(self) -> None:
         game = self.game
-        if game.held_item is None:
+        held = game.held_item
+        if held is None:
             return
-        proto = load_item(game.held_item['item_id'])
-        img = get_item_icon(proto)
-        pos = game.held_item['screen_pos']
-        game.screen.surface.blit(img, pos)
-        if game.held_item['quantity'] > 1:
-            label = game.inventory.font.render(
-                format_quantity(game.held_item['quantity']), True, COLOR_SLOT_QTY_TEXT,
-            )
-            label_rect = label.get_rect(bottomright=(pos[0] + img.get_width(), pos[1] + img.get_height()))
-            game.screen.surface.blit(label, label_rect)
+        hud_render.draw_held_cursor(
+            game.screen.surface, held, held['screen_pos'],
+            anchor='topleft', font=game.inventory.font, qty_color=COLOR_SLOT_QTY_TEXT)
 

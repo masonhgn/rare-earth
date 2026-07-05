@@ -40,7 +40,7 @@ from item import DroppedItem
 from prototype import load_prototype
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 # saves live next to the project root, not inside src/. resolves relative
 # to this file so the path is stable regardless of cwd.
@@ -138,6 +138,17 @@ def _read_save(path: str) -> dict:
     return json.loads(raw.decode('utf-8'))
 
 
+def _write_save(data: dict, path: str) -> None:
+    # atomic gzip write: dump to <path>.tmp then rename into place, so a
+    # mid-write crash never leaves a half-written save. the RLE grids are still
+    # text-repetitive, so gzip adds a large further win for near-zero cost.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with gzip.open(tmp, 'wt', encoding='utf-8') as f:
+        json.dump(data, f, separators=(',', ':'))
+    os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------------------
 # write
 # ---------------------------------------------------------------------------
@@ -150,61 +161,26 @@ def save_game(g, path: str | None = None) -> None:
         path = getattr(g, 'save_path', None) or SAVE_PATH
     w = g.world
     player = w.get_player()
-    now_ms = pg.time.get_ticks()
-
-    saved_entities = []
-    for ent in w.entities.values():
-        if ent.id == 'player':
-            continue
-        saved_entities.append({
-            'id': ent.id,
-            'prototype_id': ent.prototype.proto_id,
-            'world_x': ent.world_x,
-            'world_y': ent.world_y,
-            'components': _serialize_components(ent, now_ms),
-        })
-
     data = {
         'version': SCHEMA_VERSION,
         # display name for the world-select list; falls back to the file stem
         # on load if a legacy save predates this field.
         'name': getattr(g, 'world_name', None),
         'day_elapsed': g.day_clock.elapsed,
-        # spot prices are tied to global game state, not per-exchange.
-        # walked offsets aren't persisted — the post-load tick resumes
-        # from a clean 5s window, which is fine because individual price
-        # steps don't carry hidden state.
+        # spot prices are tied to global game state, not per-exchange. walked
+        # offsets aren't persisted — the post-load tick resumes from a clean 5s
+        # window, fine because individual price steps carry no hidden state.
         'spot_prices': dict(g.spot_market.prices),
         'player': {
             'world_x': player.world_x,
             'world_y': player.world_y,
+            # per-player forward-contract state (board/active/drop_box).
+            'exchange': player.exchange_state,
         },
         'inventory_slots': g.inventory.slots,
-        'world': {
-            'width': w.width,
-            'height': w.height,
-            'map_grid': _rle_encode(w.map_grid),
-            'overlay_grid': _rle_encode(w.overlay_grid),
-            'entities': saved_entities,
-            'dropped': [
-                {
-                    'item_id': d.item_id,
-                    'quantity': d.quantity,
-                    'world_x': d.world_x,
-                    'world_y': d.world_y,
-                }
-                for d in w.dropped
-            ],
-        },
+        'world': _serialize_world(w, pg.time.get_ticks()),
     }
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.tmp'
-    # gzip the json — the RLE grids are still text-repetitive, so gzip adds a
-    # large further win for near-zero cost. atomic via tmp + replace.
-    with gzip.open(tmp, 'wt', encoding='utf-8') as f:
-        json.dump(data, f, separators=(',', ':'))
-    os.replace(tmp, path)
+    _write_save(data, path)
 
 
 # --- per-component codecs ---------------------------------------------------
@@ -216,16 +192,13 @@ def save_game(g, path: str | None = None) -> None:
 # (de)serialize loops.
 
 def _ser_machine(state: dict, now_ms: int) -> dict:
-    # flatten wall-clock progress to elapsed-since-start so an in-progress
-    # craft resumes from the same offset after a restart.
-    craft_elapsed_ms = 0
-    if state['current_recipe'] is not None:
-        craft_elapsed_ms = max(0, now_ms - state['started_ms'])
+    # elapsed_ms is already a plain relative accumulator, so it round-trips
+    # as-is — no wall-clock flattening needed.
     return {
         'input_slots': state['input_slots'],
         'output_slots': state['output_slots'],
         'current_recipe': state['current_recipe'],
-        'craft_elapsed_ms': craft_elapsed_ms,
+        'elapsed_ms': state['elapsed_ms'],
     }
 
 
@@ -233,24 +206,7 @@ def _apply_machine(target: dict, saved: dict, now_ms: int) -> None:
     target['input_slots'] = saved['input_slots']
     target['output_slots'] = saved['output_slots']
     target['current_recipe'] = saved['current_recipe']
-    # rebuild started_ms relative to current ticks so crafting progress
-    # resumes from the same offset it was paused at.
-    target['started_ms'] = now_ms - saved.get('craft_elapsed_ms', 0)
-
-
-def _ser_exchange(state: dict, now_ms: int) -> dict:
-    # already pure plain data — copy the persisted keys.
-    return {
-        'drop_box': state['drop_box'],
-        'board': state['board'],
-        'active': state['active'],
-    }
-
-
-def _apply_exchange(target: dict, saved: dict, now_ms: int) -> None:
-    target['drop_box'] = saved.get('drop_box', target['drop_box'])
-    target['board'] = saved.get('board', [])
-    target['active'] = saved.get('active', [])
+    target['elapsed_ms'] = saved.get('elapsed_ms', 0.0)
 
 
 def _ser_mob(state: dict, now_ms: int) -> dict:
@@ -267,7 +223,6 @@ def _apply_mob(target: dict, saved: dict, now_ms: int) -> None:
 
 _COMPONENT_CODECS = {
     'machine': (_ser_machine, _apply_machine),
-    'exchange': (_ser_exchange, _apply_exchange),
     'mob': (_ser_mob, _apply_mob),
 }
 
@@ -279,6 +234,35 @@ def _serialize_components(ent, now_ms: int) -> dict:
         # unknown component — store as-is and hope it round-trips.
         out[name] = codec[0](state, now_ms) if codec else state
     return out
+
+
+def _serialize_world(w, now_ms: int) -> dict:
+    # the shared world blob: RLE grids, placed entities, dropped items. the
+    # player-owning entity is skipped — single-player restores the player from
+    # data['player'] and the server spawns players per-connection, so neither
+    # persists it here. used by both save_game and save_world.
+    saved_entities = [
+        {
+            'id': ent.id,
+            'prototype_id': ent.prototype.proto_id,
+            'world_x': ent.world_x,
+            'world_y': ent.world_y,
+            'components': _serialize_components(ent, now_ms),
+        }
+        for ent in w.entities.values() if not ent.is_player
+    ]
+    return {
+        'width': w.width,
+        'height': w.height,
+        'map_grid': _rle_encode(w.map_grid),
+        'overlay_grid': _rle_encode(w.overlay_grid),
+        'entities': saved_entities,
+        'dropped': [
+            {'item_id': d.item_id, 'quantity': d.quantity,
+             'world_x': d.world_x, 'world_y': d.world_y}
+            for d in w.dropped
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -299,83 +283,40 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
         return False
 
     w = g.world
-    wd = data['world']
+    now_ms = pg.time.get_ticks()
 
     # display name for the world-select list. older saves lack it; fall back
     # to the file stem so the world still shows a sensible label.
     g.world_name = data.get('name') or os.path.splitext(os.path.basename(path))[0]
 
-    # wipe existing world contents before repopulating from the save.
-    # width/height first — the RLE grid decode needs them to reshape rows.
-    w.width = wd['width']
-    w.height = wd['height']
-    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
-    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
-    w.entities.clear()
-    w.tile_index.clear()
-    w.dropped.clear()
-    w.spatial_grid.clear()
+    # rebuild the world (grids, placed entities, dropped items) from the blob.
+    _apply_world(w, data['world'], now_ms)
 
-    # respawn the player at the saved position. fixed id 'player' so the
-    # rest of the codebase keeps using world.get_player() unchanged.
-    player_proto = load_prototype('player')
-    player = Entity(
-        player_proto,
+    # respawn the player at the saved position. fixed id 'player' so the rest
+    # of the codebase keeps using world.get_player() unchanged. adding it after
+    # the placed entities is fine — the player isn't tile-locked and
+    # _rebuild_grid only indexes dropped items, so insertion order is moot.
+    w.add_entity(Entity(
+        load_prototype('player'),
         (data['player']['world_x'], data['player']['world_y']),
         entity_id='player',
-    )
-    w.add_entity(player)
+    ))
 
-    # respawn placed entities with their original ids so any future save
-    # references stay stable.
-    now_ms = pg.time.get_ticks()
-    for e_data in wd['entities']:
-        proto = load_prototype(e_data['prototype_id'])
-        ent = Entity(
-            proto,
-            (e_data['world_x'], e_data['world_y']),
-            entity_id=e_data['id'],
-        )
-        _apply_components(ent, e_data.get('components', {}), now_ms)
-        w.add_entity(ent)
-
-    # restore dropped items directly without going through
-    # spawn_dropped_item — that would re-run the stacking pass, and the
-    # saved positions are already post-stacking.
-    for d in wd['dropped']:
-        w.dropped.append(DroppedItem(
-            item_id=d['item_id'],
-            quantity=d['quantity'],
-            world_x=d['world_x'],
-            world_y=d['world_y'],
-        ))
-    w._rebuild_grid()
-
-    # restore inventory slots. copy each dict so save/runtime references
-    # don't alias.
-    # inventory data lives on the local player's 'player' component now.
+    # restore inventory slots. copy each dict so save/runtime references don't
+    # alias. inventory data lives on the local player's 'player' component now.
     g.world.get_player().inventory.slots = [
         None if s is None else dict(s)
         for s in data['inventory_slots']
     ]
 
-    # replace day_clock with a fresh one anchored to the saved elapsed.
-    # caller is responsible for re-binding on_rollover after this call.
-    g.day_clock = DayClock(elapsed=data['day_elapsed'])
+    # restore the player's forward-contract state (board/active/drop_box).
+    # older saves (pre-v6) lack it; the v5->v6 migration lifts it off the
+    # exchange entity, and a truly-fresh board is filled by ensure_board later.
+    saved_exchange = data['player'].get('exchange')
+    if saved_exchange is not None:
+        g.world.get_player().components['player']['exchange'] = saved_exchange
 
-    # restore spot prices for any item still tradeable. items that were
-    # tradeable when the save was written but no longer have a spot_price
-    # field today are silently dropped; new tradeable items keep their
-    # default target_price from the json.
-    saved_prices = data.get('spot_prices', {})
-    for item_id in g.spot_market.prices.keys():
-        if item_id in saved_prices:
-            g.spot_market.prices[item_id] = saved_prices[item_id]
-    g.spot_market._tick_clock = 0.0
-    # restart the sparkline history from the restored prices (history is
-    # session-local and not persisted).
-    g.spot_market.seed_history()
-
+    _restore_market_state(g, data)
     return True
 
 
@@ -387,42 +328,14 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
 def save_world(sim, path: str = SERVER_SAVE_PATH) -> None:
     # persist the shared world: grids, placed entities (skipping players),
     # dropped items, spot prices, day clock. mirrors save_game minus the
-    # player position + inventory, and reuses the same component codecs.
-    w = sim.world
-    now_ms = pg.time.get_ticks()
-    saved_entities = []
-    for ent in w.entities.values():
-        if ent.is_player:
-            continue
-        saved_entities.append({
-            'id': ent.id,
-            'prototype_id': ent.prototype.proto_id,
-            'world_x': ent.world_x,
-            'world_y': ent.world_y,
-            'components': _serialize_components(ent, now_ms),
-        })
+    # player position + inventory, and reuses the same world codec.
     data = {
         'version': SCHEMA_VERSION,
         'day_elapsed': sim.day_clock.elapsed,
         'spot_prices': dict(sim.spot_market.prices),
-        'world': {
-            'width': w.width,
-            'height': w.height,
-            'map_grid': _rle_encode(w.map_grid),
-            'overlay_grid': _rle_encode(w.overlay_grid),
-            'entities': saved_entities,
-            'dropped': [
-                {'item_id': d.item_id, 'quantity': d.quantity,
-                 'world_x': d.world_x, 'world_y': d.world_y}
-                for d in w.dropped
-            ],
-        },
+        'world': _serialize_world(sim.world, pg.time.get_ticks()),
     }
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.tmp'
-    with gzip.open(tmp, 'wt', encoding='utf-8') as f:
-        json.dump(data, f, separators=(',', ':'))
-    os.replace(tmp, path)
+    _write_save(data, path)
 
 
 def load_world(sim, path: str = SERVER_SAVE_PATH) -> bool:
@@ -441,36 +354,8 @@ def load_world(sim, path: str = SERVER_SAVE_PATH) -> bool:
     if data is None:
         return False
 
-    w = sim.world
-    wd = data['world']
-    w.width = wd['width']
-    w.height = wd['height']
-    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
-    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
-    w.entities.clear()
-    w.tile_index.clear()
-    w.dropped.clear()
-    w.spatial_grid.clear()
-
-    now_ms = pg.time.get_ticks()
-    for e_data in wd['entities']:
-        proto = load_prototype(e_data['prototype_id'])
-        ent = Entity(proto, (e_data['world_x'], e_data['world_y']), entity_id=e_data['id'])
-        _apply_components(ent, e_data.get('components', {}), now_ms)
-        w.add_entity(ent)
-    for d in wd['dropped']:
-        w.dropped.append(DroppedItem(
-            item_id=d['item_id'], quantity=d['quantity'],
-            world_x=d['world_x'], world_y=d['world_y']))
-    w._rebuild_grid()
-
-    sim.day_clock = DayClock(elapsed=data['day_elapsed'])   # caller re-binds on_rollover
-    saved_prices = data.get('spot_prices', {})
-    for item_id in sim.spot_market.prices.keys():
-        if item_id in saved_prices:
-            sim.spot_market.prices[item_id] = saved_prices[item_id]
-    sim.spot_market._tick_clock = 0.0
-    sim.spot_market.seed_history()
+    _apply_world(sim.world, data['world'], pg.time.get_ticks())
+    _restore_market_state(sim, data)
     return True
 
 
@@ -489,6 +374,55 @@ def _apply_components(ent, saved_components: dict, now_ms: int) -> None:
             codec[1](target, saved, now_ms)
         else:
             target.update(saved)
+
+
+def _apply_world(w, wd: dict, now_ms: int) -> None:
+    # wipe the world and repopulate grids + placed entities + dropped items
+    # from a saved `world` blob. shared by load_game and load_world. width/height
+    # first — the RLE grid decode needs them to reshape rows.
+    w.width = wd['width']
+    w.height = wd['height']
+    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
+    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
+    w.entities.clear()
+    w.tile_index.clear()
+    w.dropped.clear()
+    w.spatial_grid.clear()
+
+    # placed entities keep their original ids so future save references stay stable.
+    for e_data in wd['entities']:
+        ent = Entity(
+            load_prototype(e_data['prototype_id']),
+            (e_data['world_x'], e_data['world_y']),
+            entity_id=e_data['id'],
+        )
+        _apply_components(ent, e_data.get('components', {}), now_ms)
+        w.add_entity(ent)
+
+    # restore dropped items directly rather than via spawn_dropped_item — that
+    # would re-run the stacking pass, and the saved positions are already
+    # post-stacking. _rebuild_grid then indexes them for pickup queries.
+    for d in wd['dropped']:
+        w.dropped.append(DroppedItem(
+            item_id=d['item_id'], quantity=d['quantity'],
+            world_x=d['world_x'], world_y=d['world_y'],
+        ))
+    w._rebuild_grid()
+
+
+def _restore_market_state(host, data: dict) -> None:
+    # replace the day clock with one anchored to the saved elapsed seconds
+    # (caller re-binds on_rollover afterwards), and restore spot prices for any
+    # item still tradeable. items that lost their spot_price since the save are
+    # silently dropped; newly tradeable items keep their json default. sparkline
+    # history is session-local, so reseed it from the restored prices.
+    host.day_clock = DayClock(elapsed=data['day_elapsed'])
+    saved_prices = data.get('spot_prices', {})
+    for item_id in host.spot_market.prices.keys():
+        if item_id in saved_prices:
+            host.spot_market.prices[item_id] = saved_prices[item_id]
+    host.spot_market._tick_clock = 0.0
+    host.spot_market.seed_history()
 
 
 def _migrate_forward(data: dict, path: str) -> dict | None:
@@ -643,9 +577,45 @@ def _migrate_v4_to_v5(data: dict) -> dict:
     return data
 
 
+def _migrate_v5_to_v6(data: dict) -> dict:
+    # forward-contract state (board/active/drop_box) moved off the shared
+    # exchange entity onto the (single) player, who now owns it per-player.
+    # lift the first exchange entity's state onto the player block and strip
+    # the 'exchange' component from every entity. server saves carry no
+    # 'player', so their exchange state is simply dropped (players there are
+    # per-connection and regenerate a board on join).
+    world = data.get('world', {})
+    moved = None
+    for ent in world.get('entities', []):
+        comps = ent.get('components', {})
+        if 'exchange' in comps:
+            if moved is None:
+                moved = comps['exchange']
+            del comps['exchange']
+    player = data.get('player')
+    if player is not None and moved is not None:
+        player['exchange'] = moved
+    data['version'] = 6
+    return data
+
+
+def _migrate_v6_to_v7(data: dict) -> dict:
+    # machine craft progress moved from an absolute started_ms (persisted as
+    # craft_elapsed_ms) to a dt-accumulated elapsed_ms. rename the persisted
+    # field so an in-progress craft resumes at the right point.
+    for ent in data.get('world', {}).get('entities', []):
+        m = ent.get('components', {}).get('machine')
+        if m is not None and 'craft_elapsed_ms' in m:
+            m['elapsed_ms'] = m.pop('craft_elapsed_ms')
+    data['version'] = 7
+    return data
+
+
 MIGRATIONS = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
     3: _migrate_v3_to_v4,
     4: _migrate_v4_to_v5,
+    5: _migrate_v5_to_v6,
+    6: _migrate_v6_to_v7,
 }

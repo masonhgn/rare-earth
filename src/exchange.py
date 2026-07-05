@@ -8,8 +8,9 @@
 # coin and adds the item). buy is blocked when the player can't afford
 # it; sell is blocked when they don't own the item.
 #
-# forward + drop box tabs are still placeholders — they land in phases
-# 3 and 4.
+# the forward (contracts) and drop box tabs are fully implemented here for
+# single-player; over the network they aren't wired yet (the client locks
+# the panel to the spot tab).
 
 import pygame as pg
 
@@ -93,11 +94,23 @@ TAB_LABELS = ('Spot', 'Forward', 'Drop Box')
 
 
 class ExchangePanel:
-    def __init__(self, spot_market, inventory, day_clock) -> None:
+    def __init__(self, spot_market, inventory, day_clock, get_exchange_state,
+                 on_accept=None, on_cancel=None, on_dropbox_click=None) -> None:
         self.open = False
         self.entity = None
         self.spot_market = spot_market
         self.inventory = inventory
+        # per-player forward-contract state (board/active/drop_box) getter —
+        # resolves the LOCAL player's exchange each access, so it survives
+        # respawn/load and works for both single-player and the net client.
+        self.get_exchange_state = get_exchange_state
+        # optional intent hooks (net client): when set, board accept/cancel and
+        # drop-box clicks send an intent instead of mutating locally — the
+        # server is authoritative and syncs the result back. None in
+        # single-player, where the panel mutates the state directly.
+        self._on_accept = on_accept
+        self._on_cancel = on_cancel
+        self._on_dropbox_click = on_dropbox_click
         # day_clock is read at accept-contract time to stamp due_day;
         # the panel itself doesn't tick anything.
         self.day_clock = day_clock
@@ -386,7 +399,7 @@ class ExchangePanel:
     # --- forward tab ---
 
     def _render_forward(self, surface: pg.Surface, rect: pg.Rect) -> None:
-        es = self.entity.exchange_state
+        es = self.get_exchange_state()
         board = es['board']
         active = es['active']
 
@@ -496,7 +509,7 @@ class ExchangePanel:
         surface.blit(tint, (row_rect.x, row_rect.y))
 
     def _handle_forward_click(self, mouse_pos: tuple[int, int], held: dict | None) -> dict | None:
-        es = self.entity.exchange_state
+        es = self.get_exchange_state()
         # board accept (left column)
         if self.forward_board_list.rect.collidepoint(mouse_pos):
             board = es['board']
@@ -509,7 +522,7 @@ class ExchangePanel:
             row_rect = self._visible_row_rect(self.forward_board_list, idx)
             layout = self._contract_row_layout(row_rect)
             if layout['button'].collidepoint(mouse_pos):
-                accept_contract(es, idx, self.inventory, self.day_clock.day)
+                self._accept(es, idx)
             return held
         # active cancel (right column)
         if self.forward_active_list.rect.collidepoint(mouse_pos):
@@ -520,9 +533,21 @@ class ExchangePanel:
             row_rect = self._visible_row_rect(self.forward_active_list, idx)
             layout = self._contract_row_layout(row_rect)
             if layout['button'].collidepoint(mouse_pos):
-                cancel_contract(es, idx, self.inventory)
+                self._cancel(es, idx)
             return held
         return held
+
+    def _accept(self, es: dict, idx: int) -> None:
+        if self._on_accept is not None:
+            self._on_accept(idx)
+        else:
+            accept_contract(es, idx, self.inventory, self.day_clock.day)
+
+    def _cancel(self, es: dict, idx: int) -> None:
+        if self._on_cancel is not None:
+            self._on_cancel(idx)
+        else:
+            cancel_contract(es, idx, self.inventory)
 
     def _visible_row_rect(self, scroll_list: ScrollList, idx: int) -> pg.Rect:
         # row's on-screen rect accounting for the list's current scroll
@@ -545,12 +570,14 @@ class ExchangePanel:
         grid_x = rect.x + (rect.width - gw) // 2
         grid_y = rect.y + 40 + (rect.height - 40 - gh) // 2
         self.drop_grid.rect = pg.Rect(grid_x, grid_y, gw, gh)
-        slots = self.entity.exchange_state['drop_box']
+        slots = self.get_exchange_state()['drop_box']
         self.drop_grid.render(surface, slots)
 
     def _handle_dropbox_click(self, mouse_pos: tuple[int, int], held: dict | None) -> dict | None:
         idx = self.drop_grid.slot_at_pixel(mouse_pos)
         if idx is None:
             return held
-        slots = self.entity.exchange_state['drop_box']
+        if self._on_dropbox_click is not None:
+            return self._on_dropbox_click(idx, held)
+        slots = self.get_exchange_state()['drop_box']
         return self.drop_grid.handle_click(idx, held, slots)

@@ -8,13 +8,14 @@
 # the prototype is just data; rendering is done by the renderer using the
 # image referenced from `image_path`.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import random
 
 import pygame as pg
 
-from config import ITEMS_DIR, ITEM_ICON_SIZE, RECIPES_DIR
+from config import ITEMS_DIR, ITEM_ICON_SIZE, ITEM_SPRITES_DIR, RECIPES_DIR
+from dataload import from_dict
 from resources import load_image
 
 
@@ -22,7 +23,9 @@ from resources import load_image
 class ItemPrototype:
     id: str
     name: str
-    image_path: str
+    # icon image path. json key is "image"; when omitted it defaults by
+    # convention to <ITEM_SPRITES_DIR>/<id>.png (see load_item).
+    image_path: str | None = None
     # optional per-item icon size override. when None, uses ITEM_ICON_SIZE.
     # lets a single bulky-looking item (e.g. coal) sit slightly larger than
     # finer ones (coin, copper) without changing the default for everything.
@@ -31,6 +34,10 @@ class ItemPrototype:
     # when set, this is both the initial price and the mean-reversion
     # target the random walk drifts toward.
     spot_price: int | None = None
+    # placement: the entity prototype id this item spawns when placed in the
+    # world (build mode, right-hand). None = not placeable. one unit is
+    # consumed per placement.
+    places: str | None = None
 
 
 _cache: dict[str, ItemPrototype] = {}
@@ -61,13 +68,11 @@ def load_item(item_id: str) -> ItemPrototype:
         return _cache[item_id]
     with open(f'{ITEMS_DIR}/{item_id}.json') as f:
         raw = json.load(f)
-    proto = ItemPrototype(
-        id=raw['id'],
-        name=raw['name'],
-        image_path=raw['image'],
-        icon_size=raw.get('icon_size'),
-        spot_price=raw.get('spot_price'),
-    )
+    raw.setdefault('id', item_id)   # id defaults to the filename stem
+    proto = from_dict(ItemPrototype, raw, aliases={'image': 'image_path'})
+    if proto.image_path is None:
+        # convention: <ITEM_SPRITES_DIR>/<id>.png when "image" is omitted.
+        proto = replace(proto, image_path=f'{ITEM_SPRITES_DIR}/{proto.id}.png')
     _cache[item_id] = proto
     return proto
 
@@ -88,11 +93,19 @@ def roll_drops(drops_spec) -> list[tuple[str, int]]:
     # resolve a prototype's drops field into concrete (item_id, qty) pairs.
     # `quantity` per entry can be a plain int (fixed amount) or a [min, max]
     # list/tuple (rolled per break via random.randint, inclusive on both ends).
+    # an optional `chance` (0..1, default 1.0) makes the entry a rare drop:
+    # it's rolled independently and skipped when it doesn't fire. entries that
+    # resolve to 0 (or a missed chance) are dropped so we never spawn an empty
+    # stack in the world.
     out: list[tuple[str, int]] = []
     for d in drops_spec:
+        if random.random() >= d.get('chance', 1.0):
+            continue
         qty = d['quantity']
         if isinstance(qty, (list, tuple)):
             qty = random.randint(qty[0], qty[1])
+        if qty <= 0:
+            continue
         out.append((d['item'], qty))
     return out
 

@@ -3,5 +3,6 @@
     "name": "Haldrite Ore",
     "image": "src/data/sprites/items/haldrite_ore.png",
     "icon_size": 36,
-    "spot_price": 32
+    "spot_price": 32,
+    "places": "haldrite_ore"
 }

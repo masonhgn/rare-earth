@@ -10,6 +10,7 @@ from typing import Optional
 import json
 
 from config import ENTITIES_DIR
+from dataload import from_dict
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,6 @@ class EntityPrototype:
     # machine_state dict and FactorySystem ticks the entity each frame.
     machine: Optional[dict] = None
 
-    # optional exchange spec: {"drop_box_slots": int}. when set, Entity
-    # initializes exchange_state (drop box, contract board, active list).
-    exchange: Optional[dict] = None
-
     # interaction kind. when set, clicking on the entity opens the
     # registered modal panel for that kind ('factory' / 'exchange').
     # leave None for non-interactable entities (rocks, trees, ore).
@@ -106,26 +103,14 @@ class EntityPrototype:
 _cache: dict[str, EntityPrototype] = {}
 
 
-def _freeze_grid(grid):
-    return tuple(tuple(row) for row in grid)
-
-
 def load_prototype(name: str) -> EntityPrototype:
     if name in _cache:
         return _cache[name]
     with open(f'{ENTITIES_DIR}/{name}.json') as f:
         raw = json.load(f)
     raw['proto_id'] = name
-    raw['grid'] = _freeze_grid(raw['grid'])
-    if 'drops' in raw:
-        raw['drops'] = tuple(raw['drops'])
-    if 'sprite_size' in raw and raw['sprite_size'] is not None:
-        raw['sprite_size'] = tuple(raw['sprite_size'])
-    if 'hitbox' in raw and raw['hitbox'] is not None:
-        raw['hitbox'] = tuple(raw['hitbox'])
-    if 'render_offset' in raw and raw['render_offset'] is not None:
-        raw['render_offset'] = tuple(raw['render_offset'])
-    if 'footprint_size' in raw and raw['footprint_size'] is not None:
-        raw['footprint_size'] = tuple(raw['footprint_size'])
-    _cache[name] = EntityPrototype(**raw)
+    # from_dict maps keys -> fields, converts lists to tuples (grid, drops,
+    # sprite_size, hitbox, render_offset, footprint_size), and warns-and-skips
+    # any unknown key so a stale/typo'd field is loud but non-fatal.
+    _cache[name] = from_dict(EntityPrototype, raw)
     return _cache[name]

@@ -4,7 +4,7 @@
 
 import uuid
 import pygame as pg
-from config import TILE_LENGTH
+from config import TILE_LENGTH, EXCHANGE_DROP_BOX_SLOTS
 from animation import AnimationState
 from inventory_data import PlayerInventory
 
@@ -45,21 +45,18 @@ class Entity:
         # carrying its component via world.entities_with(name).
         #
         # shapes:
-        #   'machine':  {input_slots, output_slots, current_recipe, started_ms}
-        #   'exchange': {drop_box, board, active}
+        #   'machine':  {input_slots, output_slots, current_recipe, elapsed_ms}
+        # forward-contract state (board/active/drop_box) is NOT here — it's
+        # per-player and lives on the 'player' component below.
         self.components: dict[str, dict] = {}
         if prototype.machine is not None:
             self.components['machine'] = {
                 'input_slots': [None] * prototype.machine['input_slots'],
                 'output_slots': [None] * prototype.machine['output_slots'],
                 'current_recipe': None,
-                'started_ms': 0,
-            }
-        if prototype.exchange is not None:
-            self.components['exchange'] = {
-                'drop_box': [None] * prototype.exchange['drop_box_slots'],
-                'board': [],
-                'active': [],
+                # dt-accumulated craft progress (ms). a plain relative counter,
+                # so it serializes / networks with no wall-clock rebasing.
+                'elapsed_ms': 0.0,
             }
         if prototype.mob is not None:
             # ai state for MobSystem: wander/chase + cooldown timers. the
@@ -74,10 +71,18 @@ class Entity:
         if prototype.is_player:
             # per-player state on the 'player' component. `inventory` is the
             # headless authoritative item store (the client renders it via the
-            # Inventory *view*); `held_item` is the drag cursor (per-player).
+            # Inventory *view*); `held_item` is the drag cursor; `exchange` is
+            # this player's own forward-contract board/active/drop box (the
+            # board is generated lazily from the spot market via
+            # contracts.ensure_board — empty until then).
             self.components['player'] = {
                 'inventory': PlayerInventory(),
                 'held_item': None,
+                'exchange': {
+                    'board': [],
+                    'active': [],
+                    'drop_box': [None] * EXCHANGE_DROP_BOX_SLOTS,
+                },
             }
 
     @property
@@ -87,7 +92,9 @@ class Entity:
 
     @property
     def exchange_state(self) -> dict | None:
-        return self.components.get('exchange')
+        # per-player forward-contract state, or None for non-players.
+        p = self.components.get('player')
+        return p['exchange'] if p else None
 
     @property
     def is_player(self) -> bool:
@@ -109,23 +116,27 @@ class Entity:
     def held_item(self, value) -> None:
         self.components['player']['held_item'] = value
 
-    def move_continuous(self, dx: float, dy: float) -> None:
-        if self.prototype.tile_locked:
-            return
-        self.world_x += dx
-        self.world_y += dy
-
-    def move_discrete(self, tx: int, ty: int) -> None:
-        if not self.prototype.tile_locked:
-            return
-        self.world_x += tx * TILE_LENGTH
-        self.world_y += ty * TILE_LENGTH
-
     def tile_coord(self) -> tuple[int, int]:
         # floor-divide *before* int(): for negative coords, int(-0.5) == 0
         # but the player is logically in tile -1 (which spans [-64, 0)).
         # doing // first then int() gives the correct floor.
         return (int(self.world_x // TILE_LENGTH), int(self.world_y // TILE_LENGTH))
+
+    @property
+    def center(self) -> tuple[float, float]:
+        # the entity's visual center in world pixels (sprite midpoint), the
+        # canonical "where is this thing" point for reach / distance / aggro /
+        # targeting. accounts for oversized frames (a 128x128 sprite on a 64px
+        # tile). previously re-derived as a private helper in five modules.
+        w, h = self.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        return (self.world_x + w / 2, self.world_y + h / 2)
+
+    @property
+    def center_tile(self) -> tuple[int, int]:
+        # the tile containing the visual center (vs tile_coord, the top-left
+        # tile). reach checks measure from here.
+        cx, cy = self.center
+        return (int(cx // TILE_LENGTH), int(cy // TILE_LENGTH))
 
     def _footprint_dims(self) -> tuple[int, int]:
         # (cols, rows) of tiles this entity occupies. honors footprint_size

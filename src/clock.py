@@ -20,11 +20,6 @@ class DayClock:
     def day(self) -> int:
         return int(self.elapsed // DAY_LENGTH_SEC) + 1
 
-    @property
-    def day_progress(self) -> float:
-        # 0..1 fraction of the way through the current day
-        return (self.elapsed % DAY_LENGTH_SEC) / DAY_LENGTH_SEC
-
     def tick(self, dt: float) -> None:
         self.elapsed += dt
         current = self.day

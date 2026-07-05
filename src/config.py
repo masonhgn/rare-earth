@@ -19,6 +19,11 @@ INVENTORY_UI_FILE = f'{DATA_DIR}/sprites/ui/inventory.png'
 # runtime settings json (persisted across launches)
 SETTINGS_FILE = f'{DATA_DIR}/settings.json'
 
+# convention dirs / files for auto-loaded, data-driven content
+TILES_DIR = f'{DATA_DIR}/sprites/tiles'          # auto-scanned terrain/ore tiles
+ITEM_SPRITES_DIR = f'{DATA_DIR}/sprites/items'   # default item icon location
+WORLDGEN_FILE = f'{DATA_DIR}/worldgen.json'      # terrain patches + placements
+
 # display defaults (overridden by settings.json if present)
 FPS = 120
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
@@ -60,6 +65,10 @@ INVENTORY_BORDER_PX = 4
 # item icons in the inventory render at this size — the slot is 34 px with
 # a 2-px border between slots, leaving 32 px of visual icon area.
 INVENTORY_ICON_SIZE = INVENTORY_SLOT_PX - 2
+
+# exchange drop box: 6x5 grid a player deposits into to fulfil their accepted
+# forward contracts. per-player (each player owns their own box + board).
+EXCHANGE_DROP_BOX_SLOTS = 30
 
 # culling margin (extra px around viewport so things don't pop at the edge)
 CULLING_MARGIN = 96

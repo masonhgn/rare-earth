@@ -25,6 +25,7 @@ from config import TILE_LENGTH
 from item import roll_drops
 from prototype import load_prototype
 from world import tile_center
+import interaction
 
 
 # --- transient visual effects: break state + procedural chunk particles ---
@@ -140,26 +141,12 @@ class BreakSystem:
     # --- public api ---
 
     def try_acquire_target(self, tile: tuple[int, int]):
-        # returns (prototype, entity_id_or_None) for whatever's breakable at
-        # `tile`, or None. entity_id is set for placed entities; None for
-        # overlay tiles whose stats come from a prototype with the same
-        # name as the sprite_id.
-        tx, ty = tile
-        if not self.world.tile_in_reach(tx, ty):
+        # (prototype, entity_id_or_None) for whatever's breakable at `tile` and
+        # in reach, or None. detection is shared via interaction.breakable_at;
+        # the reach gate is break-specific.
+        if not self.world.tile_in_reach(*tile):
             return None
-        entity = self.world.get_entity_at_tile(tx, ty)
-        if entity is not None and entity.prototype.editable:
-            return (entity.prototype, entity.id)
-        overlay_id = self.world.overlay_at(tx, ty)
-        if overlay_id is None:
-            return None
-        try:
-            proto = load_prototype(overlay_id)
-        except FileNotFoundError:
-            return None
-        if not proto.editable:
-            return None
-        return (proto, None)
+        return interaction.breakable_at(self.world, tile)
 
     def start_break(self, proto, tile: tuple[int, int], *, entity_id: str | None) -> None:
         break_time = proto.break_time or 0.0

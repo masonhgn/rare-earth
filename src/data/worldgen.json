@@ -1,0 +1,29 @@
+{
+    "base_tile": "grass",
+    "patches": [
+        {"tile": "coal_ore", "count": 8, "radius": 5},
+        {"tile": "copper_ore", "count": 5, "radius": 4},
+        {"tile": "iron_ore", "count": 4, "radius": 4},
+        {"tile": "silver_ore", "count": 2, "radius": 3},
+        {"tile": "haldrite_ore", "count": 1, "radius": 2}
+    ],
+    "entities": [
+        {"proto": "factory", "tile": [10, 6]},
+        {"proto": "exchange", "tile": [4, 16]}
+    ],
+    "pickups": [
+        {"item": "coin", "quantity": 7, "tile": [8, 6]}
+    ],
+    "mobs": [
+        {"proto": "goblin", "tile": [8, 8]},
+        {"proto": "goblin", "tile": [30, 20]},
+        {"proto": "goblin", "tile": [14, 34]},
+        {"proto": "cow", "tile": [20, 4]},
+        {"proto": "cow", "tile": [26, 10]},
+        {"proto": "cow", "tile": [5, 28]},
+        {"proto": "cow", "tile": [34, 30]},
+        {"proto": "ghost", "tile": [2, 22]},
+        {"proto": "ghost", "tile": [24, 26]},
+        {"proto": "ghost", "tile": [36, 12]}
+    ]
+}

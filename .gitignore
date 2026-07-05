@@ -219,3 +219,6 @@ __marimo__/
 
 # rare-earth save files (per-machine player state)
 saves/
+
+# runtime-written user settings (defaults live in settings.py)
+src/data/settings.json

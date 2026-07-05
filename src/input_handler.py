@@ -9,8 +9,12 @@
 import pygame as pg
 
 from config import TILE_LENGTH, ITEM_ICON_SIZE, PLAYER_ATTACK_RANGE
+from entity import Entity
+from item import load_item
 from pathfinding import find_path
+from prototype import load_prototype
 from world import world_to_tile, tile_center
+import interaction
 
 
 # offset for centering the held item icon on the cursor
@@ -149,6 +153,10 @@ def _on_keydown(game, event) -> None:
 
     if key == pg.K_b:
         game.inventory.toggle()
+    elif key == pg.K_g:
+        # toggle build mode: left-click then places the held item as a
+        # tile-locked entity, with a green/red highlight on the hovered tile.
+        game.build_mode = not game.build_mode
     elif key == pg.K_TAB:
         game.toggle_map()
     elif key == pg.K_F2:
@@ -219,6 +227,13 @@ def _on_left_click(game, event) -> None:
         if game.inventory.rect.collidepoint((mx, my)):
             return
 
+    # build mode: left-click places the held item as a tile-locked entity
+    # instead of the normal drop/walk/break routing. movement stays on WASD;
+    # UI (inventory, modals, hud tabs) was already handled above.
+    if game.build_mode:
+        _handle_build_click(game, (mx, my))
+        return
+
     if game.held_item is not None:
         wx, wy = game.screen.camera.screen_to_world((mx, my))
         tile = world_to_tile((wx, wy))
@@ -266,18 +281,7 @@ def _on_left_click(game, event) -> None:
     # with the building when they click on grass right next to it.
     # without this, clicking a tile one step off the exchange walked
     # them there but never triggered the open.
-    clicked_openable = None
-    entity_here = game.world.get_entity_at_tile(*tile)
-    if entity_here is not None and entity_here.prototype.interactable is not None:
-        clicked_openable = entity_here
-    else:
-        for ent in game.world.entities.values():
-            if ent.prototype.interactable is None:
-                continue
-            if any(max(abs(tile[0] - tx), abs(tile[1] - ty)) <= 1
-                   for tx, ty in ent.footprint()):
-                clicked_openable = ent
-                break
+    clicked_openable = interaction.openable_at(game.world, tile)
 
     # toggle: clicking on whichever entity's panel is already open closes it.
     if clicked_openable is not None:
@@ -337,51 +341,70 @@ def _on_left_click(game, event) -> None:
         game.pending_action = None
 
 
-def _click_breakable_at(game, tile):
-    # returns (prototype, entity_id_or_None, tile) for a breakable at `tile`,
-    # or None. mirrors BreakSystem.try_acquire_target minus the reach check —
-    # click-to-walk wants to *plan toward* out-of-reach targets, not reject.
-    entity = game.world.get_entity_at_tile(*tile)
-    if entity is not None and entity.prototype.editable:
-        return (entity.prototype, entity.id, tile)
-    overlay_id = game.world.overlay_at(*tile)
-    if overlay_id is None:
-        return None
-    from prototype import load_prototype
+# --- build-mode placement ---
+#
+# in build mode a left-click places the held item as a tile-locked entity on
+# the hovered tile, if the item is placeable (has a `places` prototype id) and
+# the tile is a valid, in-reach target. one unit is consumed per placement.
+# out-of-reach / invalid clicks are no-ops — the build highlight already shows
+# red for those.
+
+def placeable_here(game, tile) -> bool:
+    # single-player wrapper over interaction.can_place (which already includes
+    # the reach + held-placeable checks) for the local player.
+    return interaction.can_place(game.world, game.world.get_player(), tile, game.held_item)
+
+
+def _handle_build_click(game, screen_pos) -> None:
+    held = game.held_item
+    if held is None:
+        return
+    proto = load_item(held['item_id'])
+    if proto.places is None:
+        return  # non-placeable held item: swallow the click, do nothing
+    wx, wy = game.screen.camera.screen_to_world(screen_pos)
+    tile = world_to_tile((wx, wy))
+    if placeable_here(game, tile):   # can_place already includes the reach check
+        _place_one(game, proto, tile)
+
+
+def _place_one(game, item_proto, tile) -> None:
+    tx, ty = tile
+    entity = Entity(load_prototype(item_proto.places), (tx * TILE_LENGTH, ty * TILE_LENGTH))
     try:
-        proto = load_prototype(overlay_id)
-    except FileNotFoundError:
-        return None
-    if not proto.editable:
-        return None
-    return (proto, None, tile)
+        game.world.add_entity(entity)
+    except ValueError:
+        return  # lost the race for the tile — leave the held stack intact
+    # consume one unit from the held cursor, preserving its screen_pos.
+    held = game.held_item
+    if held['quantity'] <= 1:
+        game.held_item = None
+    else:
+        game.held_item = {**held, 'quantity': held['quantity'] - 1}
 
 
-def _entity_center(e) -> tuple[float, float]:
-    w, h = e.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    return (e.world_x + w / 2, e.world_y + h / 2)
+def _click_breakable_at(game, tile):
+    # (prototype, entity_id_or_None, tile) for a breakable at `tile`, or None.
+    # no reach check — click-to-walk plans toward out-of-reach targets.
+    found = interaction.breakable_at(game.world, tile)
+    return None if found is None else (found[0], found[1], tile)
 
 
 def _click_mob_at(game, wx: float, wy: float):
-    # the mob whose visible body (hitbox) contains the click, or None.
-    for ent in game.world.entities_with('mob'):
-        if ent.hitbox_rect().collidepoint(wx, wy):
-            return ent
-    return None
+    return interaction.mob_at(game.world, wx, wy)
 
 
 def _in_attack_range(game, mob) -> bool:
-    pcx, pcy = _entity_center(game.world.get_player())
-    mcx, mcy = _entity_center(mob)
+    pcx, pcy = game.world.get_player().center
+    mcx, mcy = mob.center
     return (pcx - mcx) ** 2 + (pcy - mcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2
 
 
 def _walk_to_mob(game, mob) -> None:
     # path toward the mob's current tile and queue an attack-on-arrival.
     player = game.world.get_player()
-    sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    player_tile = world_to_tile((player.world_x + sw / 2, player.world_y + sh / 2))
-    mob_tile = world_to_tile(_entity_center(mob))
+    player_tile = player.center_tile
+    mob_tile = world_to_tile(mob.center)
     goal = mob_tile if game.world.is_walkable(*mob_tile) else game.world.nearest_walkable(*mob_tile)
     if goal is None:
         return

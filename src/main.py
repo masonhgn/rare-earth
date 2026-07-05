@@ -14,11 +14,14 @@ def main() -> None:
     pg.init()
     pg.font.init()
     pg.display.set_caption('rare-earth')
-    surface = pg.display.set_mode((1280, 720))
     try:
-        # title <-> world-select loop: the world screen's Back returns here so
-        # the player can bounce between them until they pick a world or quit.
+        # title <-> world-select <-> game loop. the world screen's Back and a
+        # game's "Back to Title" both return here so the player can bounce
+        # between screens until they pick Quit.
         while True:
+            # (re)acquire the window each pass — a game/client may have reopened
+            # the display at a different size, invalidating the old surface.
+            surface = pg.display.set_mode((1280, 720))
             choice = show_title(surface)
             if choice is None:
                 return
@@ -28,12 +31,14 @@ def main() -> None:
                     continue  # Back: return to the title screen
                 save_path, world_name = selection
                 from game import Game
-                Game(save_path=save_path, world_name=world_name).start()
-                return  # game exited -> quit the launcher
+                if Game(save_path=save_path, world_name=world_name).start() == 'title':
+                    continue
+                return  # Quit Game -> quit the launcher
             else:
                 _, host, port = choice
                 from client import run as run_client
-                run_client(host, port)
+                if run_client(host, port) == 'title':
+                    continue
                 return
     finally:
         pg.quit()

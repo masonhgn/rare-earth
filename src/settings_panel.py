@@ -46,13 +46,18 @@ SAVE_ACK_MS = 1500
 
 
 class SettingsPanel:
-    def __init__(self, display, on_save, on_quit) -> None:
+    def __init__(self, display, on_save, on_quit, show_save: bool = True,
+                 on_title=None) -> None:
         # display: DisplayService — read current mode, switch + re-anchor.
-        # on_save / on_quit: zero-arg callbacks. panel doesn't know about
-        # Game or save_state directly anymore.
+        # on_save / on_quit / on_title: zero-arg callbacks. show_save=False
+        # hides the "Save Game" section (the net client has no local save).
+        # on_title, when set, adds a "Back to Title" button that returns to the
+        # main menu instead of quitting the whole program.
         self.display = display
         self.on_save = on_save
         self.on_quit = on_quit
+        self.on_title = on_title
+        self.show_save = show_save
         self.open = False
         self.skin = NineSliceSkin(PANEL_SKIN_FILE, PANEL_SKIN_CORNER, scale=PANEL_SKIN_SCALE)
         self.font = get_font(20)
@@ -90,8 +95,8 @@ class SettingsPanel:
             if rect.collidepoint(mouse_pos):
                 self._apply_mode(mode)
                 return
-        # save button
-        if self._save_button_rect().collidepoint(mouse_pos):
+        # save button (single-player only)
+        if self.show_save and self._save_button_rect().collidepoint(mouse_pos):
             self.on_save()
             self._save_ack_ms = pg.time.get_ticks()
             return
@@ -99,6 +104,10 @@ class SettingsPanel:
         # shutdown sequence (autosave, pg.quit, etc.).
         if self._quit_button_rect().collidepoint(mouse_pos):
             self.on_quit()
+            return
+        # back-to-title button (optional): return to the main menu.
+        if self.on_title is not None and self._title_button_rect().collidepoint(mouse_pos):
+            self.on_title()
             return
 
     # --- mutations ---
@@ -134,30 +143,36 @@ class SettingsPanel:
             draw_button(surface, rect, MODE_LABELS[mode], self.font,
                         bg=color, border=border, text_color=COLOR_TEXT_BODY)
 
-        # "Save Game" caption + button
-        save_section_y = section_y + 32 + MODE_BUTTON_H + 28
-        caption = self.font.render('Save Game', True, COLOR_TEXT_MUTED)
-        surface.blit(caption, (x + INNER_MARGIN, save_section_y))
-        save_rect = self._save_button_rect()
-        Button(save_rect, 'Save Now', self.font_big).render(surface)
+        # "Save Game" caption + button — single-player only; the net client
+        # hides this (no local save) and its Quit button takes this slot.
+        if self.show_save:
+            save_section_y = section_y + 32 + MODE_BUTTON_H + 28
+            caption = self.font.render('Save Game', True, COLOR_TEXT_MUTED)
+            surface.blit(caption, (x + INNER_MARGIN, save_section_y))
+            save_rect = self._save_button_rect()
+            Button(save_rect, 'Save Now', self.font_big).render(surface)
 
-        # save ack fades out a moment after a click for feedback
-        if self._save_ack_ms is not None:
-            age = pg.time.get_ticks() - self._save_ack_ms
-            if age >= SAVE_ACK_MS:
-                self._save_ack_ms = None
-            else:
-                alpha = int(255 * (1 - age / SAVE_ACK_MS))
-                ack = self.font_small.render('saved.', True, (200, 240, 170))
-                ack.set_alpha(alpha)
-                surface.blit(ack, ack.get_rect(
-                    midtop=(save_rect.centerx, save_rect.bottom + 6),
-                ))
+            # save ack fades out a moment after a click for feedback
+            if self._save_ack_ms is not None:
+                age = pg.time.get_ticks() - self._save_ack_ms
+                if age >= SAVE_ACK_MS:
+                    self._save_ack_ms = None
+                else:
+                    alpha = int(255 * (1 - age / SAVE_ACK_MS))
+                    ack = self.font_small.render('saved.', True, (200, 240, 170))
+                    ack.set_alpha(alpha)
+                    surface.blit(ack, ack.get_rect(
+                        midtop=(save_rect.centerx, save_rect.bottom + 6),
+                    ))
 
         # "Quit Game" button. main loop's shutdown path autosaves before
         # pg.quit, so no extra ack here.
         quit_rect = self._quit_button_rect()
         Button(quit_rect, 'Quit Game', self.font_big).render(surface)
+
+        # "Back to Title" button (optional) — returns to the main menu.
+        if self.on_title is not None:
+            Button(self._title_button_rect(), 'Back to Title', self.font_big).render(surface)
 
 
     # --- geometry helpers ---
@@ -183,9 +198,20 @@ class SettingsPanel:
 
     def _quit_button_rect(self) -> pg.Rect:
         # stacked under the save button. ACTION_BUTTON_GAP separates the
-        # two so a misclick on save doesn't accidentally quit.
+        # two so a misclick on save doesn't accidentally quit. when the save
+        # section is hidden (net client), quit takes the save button's slot.
+        if not self.show_save:
+            return self._save_button_rect()
         save = self._save_button_rect()
         return pg.Rect(
             save.x, save.bottom + ACTION_BUTTON_GAP,
+            ACTION_BUTTON_W, ACTION_BUTTON_H,
+        )
+
+    def _title_button_rect(self) -> pg.Rect:
+        # stacked under the quit button.
+        quit_r = self._quit_button_rect()
+        return pg.Rect(
+            quit_r.x, quit_r.bottom + ACTION_BUTTON_GAP,
             ACTION_BUTTON_W, ACTION_BUTTON_H,
         )

@@ -19,23 +19,30 @@ import queue
 import socket
 import sys
 import threading
-from types import SimpleNamespace
 
 import pygame as pg
 
 from config import TITLE, TILE_LENGTH, ITEM_ICON_SIZE
-from world import World, world_to_tile
-from render import Screen, Minimap, WorldRenderer
-from breaking import BreakSystem
+from world import World, world_to_tile, in_reach
+from render import Screen, Minimap, WorldRenderer, MapView
+from breaking import BreakSystem, BreakState
 from entity import Entity
 from prototype import load_prototype
 from inventory import Inventory
 from exchange import ExchangePanel
 from factory import FactoryPanel
 from spot_market import SpotMarket, HISTORY_LEN
+from clock import DayClock
 from item import DroppedItem, get_item_icon, load_item, format_quantity
 from save_state import _rle_decode
+from settings import load_settings
+from display import DisplayService
+from settings_panel import SettingsPanel
+from hud import Hud
+from hud_tabs import HudTabs
 from ui_theme import get_font
+import hud_render
+import interaction
 import movement
 import netproto
 
@@ -75,23 +82,17 @@ class _NetSpotMarket(SpotMarket):
             self.prices[item_id] = price
 
 
-def _center_of(e):
-    w, h = e.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    return (e.world_x + w / 2, e.world_y + h / 2)
-
-
 def _openable_near(world, wx, wy, local_id):
-    # the exchange or machine entity under the cursor, if the local player is
-    # within ~6 tiles. None otherwise.
-    tx, ty = world_to_tile((wx, wy))
-    ent = world.get_entity_at_tile(tx, ty)
-    if ent is None or not ('exchange' in ent.components or 'machine' in ent.components):
+    # the interactable entity under or adjacent to the cursor, if the local
+    # player is within ~6 tiles. None otherwise.
+    ent = interaction.openable_at(world, world_to_tile((wx, wy)))
+    if ent is None:
         return None
     p = world.entities.get(local_id)
     if p is None:
         return None
-    ecx, ecy = _center_of(ent)
-    pcx, pcy = _center_of(p)
+    ecx, ecy = ent.center
+    pcx, pcy = p.center
     if (ecx - pcx) ** 2 + (ecy - pcy) ** 2 <= (6 * TILE_LENGTH) ** 2:
         return ent
     return None
@@ -197,76 +198,86 @@ def _poll_move_dir():
     return (dx, dy)
 
 
-def _draw_health_bar(surface, player) -> None:
-    if player is None or player.health is None:
-        return
-    w, h = 260, 20
-    x = (surface.get_width() - w) // 2
-    y = surface.get_height() - h - 14
-    frac = max(0.0, player.health / player.max_health)
-    pg.draw.rect(surface, (0, 0, 0), (x - 2, y - 2, w + 4, h + 4))
-    pg.draw.rect(surface, (150, 40, 40), (x, y, w, h))
-    if frac > 0:
-        pg.draw.rect(surface, (70, 200, 80), (x, y, int(w * frac), h))
-    pg.draw.rect(surface, (235, 235, 235), (x, y, w, h), width=1)
-
-
 def _attack_target_at(world, wx: float, wy: float, local_id):
     # the mob whose body is under the cursor (None if the click missed).
-    for ent in world.entities.values():
-        if ent.id == local_id:
-            continue
-        if 'mob' in ent.components and ent.hitbox_rect().collidepoint(wx, wy):
-            return ent
-    return None
+    return interaction.mob_at(world, wx, wy, exclude_id=local_id)
 
 
 def _draw_overhead_bars(surface, world, cam, local_id) -> None:
-    # small green/red bar over any wounded non-local entity (mobs + other
-    # players). the local player uses the bottom-of-screen bar instead.
+    # keep the client's gating (health < max — no synced last_damage_ms);
+    # the per-bar draw is shared with single-player.
     for ent in world.entities.values():
         if ent.id == local_id or ent.health is None or ent.max_health is None:
             continue
         if ent.health >= ent.max_health:
             continue
-        hb = ent.hitbox_rect()
-        bx, by = cam.world_to_screen((hb.centerx - 22, hb.top - 12))
-        bx, by = int(bx), int(by)
-        frac = max(0.0, ent.health / ent.max_health)
-        pg.draw.rect(surface, (20, 20, 24), (bx - 1, by - 1, 46, 7))
-        pg.draw.rect(surface, (150, 40, 40), (bx, by, 44, 5))
-        if frac > 0:
-            pg.draw.rect(surface, (70, 200, 80), (bx, by, int(44 * frac), 5))
+        hud_render.draw_overhead_bar(surface, cam, ent)
 
 
-def _draw_death(surface) -> None:
-    w, h = surface.get_size()
-    veil = pg.Surface((w, h), pg.SRCALPHA)
-    veil.fill((0, 0, 0, 180))
-    surface.blit(veil, (0, 0))
-    label = get_font(72).render('YOU DIED', True, (170, 30, 30))
-    surface.blit(label, label.get_rect(center=(w // 2, h // 2)))
+# --- build-mode placement (client side) ---
+
+def _client_can_place(world, local_id, held, tile) -> bool:
+    # client-side placement validity, delegating to the shared check so it
+    # always matches the server. keyed on local_id (the client's player isn't
+    # the fixed-id 'player').
+    p = world.entities.get(local_id)
+    return p is not None and interaction.can_place(world, p, tile, held)
 
 
-def _draw_held(surface, held) -> None:
-    # the drag cursor: the held stack's icon following the mouse.
-    if not held:
+# --- break (client side): timed progress bar, server-authoritative finalize ---
+#
+# the client runs the break TIMER locally (so the progress bar + per-material
+# duration feel right) but never mutates the world itself — on completion it
+# sends a break intent and the server does the authoritative clear, which comes
+# back as an overlay delta / entity despawn. keyed on local_id since the client's
+# player isn't the fixed-id 'player' the World reach helper assumes.
+
+def _begin_break(world, local_id, break_system, sock, tile) -> None:
+    p = world.entities.get(local_id)
+    if p is None or not in_reach(p, *tile):
+        return   # in-reach only for now (no walk-to-break over the net yet)
+    found = interaction.breakable_at(world, tile)
+    if found is None:
         return
-    icon = get_item_icon(load_item(held['item_id']), size=ITEM_ICON_SIZE)
-    mx, my = pg.mouse.get_pos()
-    surface.blit(icon, (mx - icon.get_width() // 2, my - icon.get_height() // 2))
-    if held['quantity'] > 1:
-        font = get_font(16)
-        text = format_quantity(held['quantity'])
-        r = font.render(text, True, (255, 255, 255)).get_rect(
-            bottomright=(mx + icon.get_width() // 2, my + icon.get_height() // 2))
-        surface.blit(font.render(text, True, (0, 0, 0)), r.move(1, 1))
-        surface.blit(font.render(text, True, (255, 255, 255)), r)
+    proto, entity_id = found
+    break_time = proto.break_time or 0.0
+    if break_time <= 0:
+        try:   # instant material: no timer, just fire the intent
+            netproto.send(sock, {'type': 'break', 'tile': [tile[0], tile[1]]})
+        except OSError:
+            pass
+        return
+    break_system.breaking = BreakState(
+        start_ms=pg.time.get_ticks(),
+        duration_ms=int(break_time * 1000),
+        tile=tile,
+        entity_id=entity_id,
+    )
+
+
+def _update_break(world, local_id, break_system, sock) -> None:
+    bk = break_system.breaking
+    if bk is None:
+        return
+    # cancel if the target vanished (someone else / the server cleared it) or we
+    # walked out of reach.
+    p = world.entities.get(local_id)
+    gone = (bk.entity_id not in world.entities) if bk.entity_id is not None \
+        else (world.overlay_at(*bk.tile) is None)
+    if p is None or gone or not in_reach(p, *bk.tile):
+        break_system.breaking = None
+        return
+    if bk.is_complete(pg.time.get_ticks()):
+        try:
+            netproto.send(sock, {'type': 'break', 'tile': [bk.tile[0], bk.tile[1]]})
+        except OSError:
+            pass
+        break_system.breaking = None
 
 
 # --- main ---
 
-def run(host: str = '127.0.0.1', port: int = 5555) -> None:
+def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
     try:
         sock = socket.create_connection((host, port))
     except OSError as exc:
@@ -281,9 +292,15 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
 
     pg.init()
     pg.display.set_caption(f'{TITLE} (client {local_id})')
-    screen = Screen(1280, 720)
+    settings = load_settings()
+    screen = Screen(settings['screen_width'], settings['screen_height'],
+                    display_mode=settings['display_mode'])
     world = World()
     _build_world(world, welcome['world'], local_id)
+    # local read-only day clock: elapsed is overwritten from the server each
+    # snapshot (never ticked here, so no client-side rollover side effects).
+    day_clock = DayClock()
+    day_clock.elapsed = welcome['world'].get('day_elapsed', 0.0)
     minimap = Minimap(world)
     world_renderer = WorldRenderer(screen, world, BreakSystem(world))
     # read-only inventory panel over the local player's synced slots (B toggles).
@@ -297,8 +314,55 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
         except OSError:
             pass
     net_spot = _NetSpotMarket(_send_trade)
-    exchange_panel = ExchangePanel(net_spot, inventory, SimpleNamespace(day=0))
+
+    def _send_intent(msg):
+        try:
+            netproto.send(sock, msg)
+        except OSError:
+            pass
+
+    def _send_dropbox(idx, held):
+        # server owns the drop box + held cursor; it syncs the result back on
+        # the next inv/exchange message, so we don't mutate locally.
+        _send_intent({'type': 'dropbox', 'slot': idx})
+        return held
+
+    exchange_panel = ExchangePanel(
+        net_spot, inventory, day_clock,
+        get_exchange_state=lambda: world.entities[local_id].exchange_state,
+        on_accept=lambda idx: _send_intent({'type': 'accept', 'index': idx}),
+        on_cancel=lambda idx: _send_intent({'type': 'cancel', 'index': idx}),
+        on_dropbox_click=_send_dropbox,
+    )
     factory_panel = FactoryPanel()
+
+    # client shell: display facade + settings modal (ESC) + full-screen map
+    # (Tab) + diagnostics/day HUD (F3) + right-edge tabs. reuses the same
+    # decoupled widgets as single-player.
+    def _reanchor_inventory():
+        inventory.origin = (16, screen.height - inventory.panel_image.get_height() - 16)
+        inventory.rect.topleft = inventory.origin
+    display = DisplayService(settings, screen, on_resize=_reanchor_inventory)
+    hud = Hud()
+    hud.visible = settings.get('show_hud', True)
+    map_view = MapView(world)
+    ui_state = {'quit': False, 'title': False}   # settings Quit / Back to Title
+    settings_panel = SettingsPanel(
+        display, on_save=None,
+        on_quit=lambda: ui_state.__setitem__('quit', True),
+        show_save=False,
+        on_title=lambda: ui_state.__setitem__('title', True),
+    )
+
+    def _toggle_settings():
+        if settings_panel.open:
+            settings_panel.close()
+        else:
+            settings_panel.open_panel((screen.width, screen.height))
+    hud_tabs = HudTabs(screen, [
+        ('inventory', 'src/data/sprites/ui/tabs/backpack.png', inventory.toggle),
+        ('settings', 'src/data/sprites/ui/tabs/settings.png', _toggle_settings),
+    ])
 
     incoming: queue.Queue = queue.Queue()
     net_alive = {'ok': True}
@@ -320,15 +384,21 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
 
     clock = pg.time.Clock()
     last_dir = None
+    build_mode = False
     running = True
-    while running and net_alive['ok']:
+    while running and net_alive['ok'] and not ui_state['quit'] and not ui_state['title']:
         dt = clock.tick(120) / 1000.0
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 running = False
             elif event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
-                    if exchange_panel.open:
+                    # close the top open overlay; if none, open the settings modal.
+                    if map_view.open:
+                        map_view.close()
+                    elif settings_panel.open:
+                        settings_panel.close()
+                    elif exchange_panel.open:
                         exchange_panel.close()
                     elif factory_panel.open:
                         factory_panel.close()
@@ -337,9 +407,17 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                         except OSError:
                             running = False
                     else:
-                        running = False
+                        settings_panel.open_panel((screen.width, screen.height))
                 elif event.key == pg.K_b:
                     inventory.toggle()
+                elif event.key == pg.K_g:
+                    build_mode = not build_mode
+                elif event.key == pg.K_TAB:
+                    map_view.toggle()
+                elif event.key == pg.K_F2:
+                    display.cycle_mode()
+                elif event.key == pg.K_F3:
+                    hud.toggle()
             elif event.type == pg.MOUSEWHEEL:
                 if exchange_panel.open:
                     exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
@@ -350,10 +428,18 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                 lp = world.entities.get(local_id)
                 held = lp.held_item if lp is not None else None
                 try:
-                    if exchange_panel.open and exchange_panel.hit(pos):
-                        exchange_panel.handle_click(pos, None)   # spot only
-                        if exchange_panel.tabs is not None:
-                            exchange_panel.tabs.active = 0   # lock to Spot; forward/dropbox aren't networked
+                    if hud_tabs.handle_click(pos):
+                        pass   # a right-edge tab consumed the click
+                    elif map_view.open:
+                        pass   # swallow world clicks while the full-screen map is up
+                    elif settings_panel.open:
+                        if settings_panel.hit(pos):
+                            settings_panel.handle_click(pos)
+                        else:
+                            settings_panel.close()
+                    elif exchange_panel.open and exchange_panel.hit(pos):
+                        # spot / forward / drop-box all route through intents now
+                        exchange_panel.handle_click(pos, held)
                     elif factory_panel.open and factory_panel.hit(pos):
                         kind, idx = factory_panel.slot_at_pixel(pos)
                         netproto.send(sock, {'type': 'machine_click', 'kind': kind, 'slot': idx})
@@ -368,7 +454,11 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                         netproto.send(sock, {'type': 'close_machine'})
                     else:
                         wx, wy = screen.camera.screen_to_world(pos)
-                        if held is not None:
+                        if build_mode:
+                            tile = world_to_tile((wx, wy))
+                            if _client_can_place(world, local_id, held, tile):
+                                netproto.send(sock, {'type': 'place', 'tile': list(tile)})
+                        elif held is not None:
                             netproto.send(sock, {'type': 'drop', 'x': wx, 'y': wy})
                         else:
                             ent = _openable_near(world, wx, wy, local_id)
@@ -382,9 +472,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                                 if target is not None:
                                     netproto.send(sock, {'type': 'attack', 'target': target.id})
                                 else:
-                                    tx, ty = world_to_tile((wx, wy))
-                                    if world.overlay_at(tx, ty) is not None:
-                                        netproto.send(sock, {'type': 'break', 'tile': [tx, ty]})
+                                    _begin_break(world, local_id, world_renderer.break_system,
+                                                 sock, world_to_tile((wx, wy)))
                 except OSError:
                     running = False
 
@@ -400,12 +489,17 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                 if mtype == 'snapshot':
                     _apply_overlay(world, minimap, msg.get('overlay', []))
                     net_spot.apply_prices(msg.get('prices', {}))
+                    day_clock.elapsed = msg.get('day_elapsed', day_clock.elapsed)
                     latest_snap = msg
                 elif mtype == 'inv':
                     lp = world.entities.get(local_id)
                     if lp is not None:
                         lp.inventory.slots = msg['slots']
                         lp.held_item = msg.get('held')
+                elif mtype == 'exchange':
+                    lp = world.entities.get(local_id)
+                    if lp is not None:
+                        lp.components['player']['exchange'] = msg['state']
                 elif mtype == 'machine':
                     ent = world.entities.get(msg['id'])
                     if ent is not None and 'machine' in ent.components:
@@ -413,7 +507,7 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                         ms['input_slots'] = msg['input']
                         ms['output_slots'] = msg['output']
                         ms['current_recipe'] = msg['recipe']
-                        ms['started_ms'] = pg.time.get_ticks() - msg['elapsed']
+                        ms['elapsed_ms'] = msg['elapsed']
         except queue.Empty:
             pass
         if latest_snap is not None:
@@ -435,6 +529,14 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
         # smooth: predict the local player, interpolate everyone else
         _step_local(world, local_id, move_dir, dt)
         _step_remote(world, local_id, dt)
+        # advance the local break timer (progress bar); fires the intent on done
+        _update_break(world, local_id, world_renderer.break_system, sock)
+        # advance the open machine's craft progress locally between server
+        # updates so the bar is smooth; each 'machine' message re-syncs it.
+        if factory_panel.open and factory_panel.entity is not None:
+            fms = factory_panel.entity.components.get('machine')
+            if fms and fms.get('current_recipe') is not None:
+                fms['elapsed_ms'] = fms.get('elapsed_ms', 0.0) + dt * 1000.0
 
         if player is not None:
             sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
@@ -445,7 +547,14 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
         # over-head bars are world-space, so draw them onto the offscreen
         # world surface and present (scale by zoom) before the native-res ui.
         _draw_overhead_bars(screen.world_surface, world, screen.camera, local_id)
+        if build_mode and player is not None:
+            hud_render.draw_build_highlight(screen.world_surface, world, screen.camera,
+                                            player, player.held_item, pg.mouse.get_pos())
         screen.present_world()
+        # screen-space ui
+        hud.render(screen.surface, fps=clock.get_fps(), frame_ms=dt * 1000,
+                   n_entities=len(world.entities), n_dropped=len(world.dropped))
+        hud.render_day_counter(screen.surface, day=day_clock.day)
         if player is not None:
             sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
             minimap.render(
@@ -453,13 +562,19 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
                 (player.world_x + sw / 2, player.world_y + sh / 2),
             )
             inventory.render(screen.surface)
+        hud_tabs.render(screen.surface)
         exchange_panel.render(screen.surface, (screen.width, screen.height))
         factory_panel.render(screen.surface, (screen.width, screen.height))
+        settings_panel.render(screen.surface, (screen.width, screen.height))
+        map_view.render(screen.surface, (screen.width, screen.height), screen.camera)
         if player is not None:
-            _draw_held(screen.surface, player.held_item)
-        _draw_health_bar(screen.surface, player)
+            hud_render.draw_held_cursor(screen.surface, player.held_item, pg.mouse.get_pos(),
+                                        anchor='center', icon_size=ITEM_ICON_SIZE, shadow=True)
+        hud_render.draw_health_bar(screen.surface, player)
+        if build_mode:
+            hud_render.draw_build_indicator(screen.surface)
         if dead:
-            _draw_death(screen.surface)
+            hud_render.draw_death_overlay(screen.surface, opaque=False)
         pg.display.flip()
 
     print('[client] disconnected')
@@ -467,7 +582,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> None:
         sock.close()
     except OSError:
         pass
-    pg.quit()
+    # pygame stays initialized so the launcher can reuse the window (main.py
+    # owns the final pg.quit()).
+    return 'title' if ui_state['title'] else None
 
 
 def main() -> None:

@@ -1,0 +1,7 @@
+{
+    "id": "pendant",
+    "name": "Pendant",
+    "image": "src/data/sprites/items/pendant.png",
+    "icon_size": 36,
+    "spot_price": 150
+}

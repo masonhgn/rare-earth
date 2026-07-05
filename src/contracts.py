@@ -112,6 +112,13 @@ def initial_board(spot_market) -> list:
     return [generate_contract(spot_market) for _ in range(BOARD_SIZE)]
 
 
+def ensure_board(es: dict, spot_market) -> None:
+    # fill a player's contract board on first use (fresh spawn / new world).
+    # no-op once populated, so a loaded save keeps whatever board it had.
+    if es is not None and not es['board']:
+        es['board'] = initial_board(spot_market)
+
+
 # ---------------------------------------------------------------------------
 # ContractSystem — per-frame countdown + auto-settle on expiry
 # ---------------------------------------------------------------------------
@@ -130,23 +137,25 @@ class ContractSystem:
         self.world = world
 
     def settle_day_rollover(self, current_day: int) -> None:
-        # called from Game._on_day_rollover with the new day. any active
-        # contract whose due_day has arrived (or has somehow been passed)
-        # settles now; not-yet-due contracts carry over.
-        for ent in self.world.entities_with('exchange'):
-            self._settle_due(ent.components['exchange'], current_day)
+        # called on day rollover. each player's own active contracts settle
+        # against their own drop box + inventory; not-yet-due contracts carry
+        # over. per-player ownership: your collateral, your box, your payout.
+        for player in self.world.players():
+            self._settle_due(player.exchange_state, current_day, player)
 
-    def _settle_due(self, es: dict, current_day: int) -> None:
+    def _settle_due(self, es: dict, current_day: int, player) -> None:
+        if es is None:
+            return
         survivors = []
         for contract in es['active']:
             due = contract.get('due_day')
             if due is None or due > current_day:
                 survivors.append(contract)
                 continue
-            self._settle(contract, es)
+            self._settle(contract, es, player)
         es['active'] = survivors
 
-    def _settle(self, contract: dict, es: dict) -> None:
+    def _settle(self, contract: dict, es: dict, player) -> None:
         # try to take deliver_qty of deliver_item from the drop box.
         # all-or-nothing: if we can't fulfil the full quantity, the
         # contract fails and collateral is lost.
@@ -154,8 +163,8 @@ class ContractSystem:
             # success: pay the player + return collateral (both go to
             # inventory; overflow to floor via spawn_dropped_item at the
             # player's feet so nothing is silently lost).
-            self._pay_player(contract['receive_item'], contract['receive_qty'])
-            self._pay_player('coin', contract['collateral'])
+            self._pay_player(player, contract['receive_item'], contract['receive_qty'])
+            self._pay_player(player, 'coin', contract['collateral'])
         # failure case: collateral was already deducted at accept time.
         # we don't refund. deposited items remain in the drop box.
 
@@ -167,11 +176,9 @@ class ContractSystem:
         # leaves the box untouched.
         return slot_ops.take(drop_box, item_id, qty)
 
-    def _pay_player(self, item_id: str, qty: int) -> None:
+    def _pay_player(self, player, item_id: str, qty: int) -> None:
         if qty <= 0:
             return
-        # pay the (local) player; per-contract ownership lands in Phase 3.
-        player = self.world.get_player()
         leftover = player.inventory.add_item(item_id, qty)
         if leftover > 0:
             # inventory rejected the full add (mismatched stacks fill it).

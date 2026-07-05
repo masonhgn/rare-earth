@@ -13,11 +13,6 @@ KNOCKBACK_DECAY = 14.0                            # per-second decay (higher = f
 KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY   # initial px/s; ~1 tile of total travel
 
 
-def _center(entity) -> tuple[float, float]:
-    w, h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    return (entity.world_x + w / 2, entity.world_y + h / 2)
-
-
 def _blocked(world, entity) -> bool:
     # True if `entity`'s hitbox overlaps a solid (tile-locked) entity's
     # footprint, OR another living (non-tile-locked) entity's hitbox. living
@@ -117,8 +112,8 @@ def separate_living(world) -> None:
 def knock_back(attacker, target) -> None:
     # send `target` flying away from `attacker`. the impulse is integrated +
     # decayed each frame by apply_knockback. used when an attack lands.
-    ax, ay = _center(attacker)
-    tx, ty = _center(target)
+    ax, ay = attacker.center
+    tx, ty = target.center
     dx, dy = tx - ax, ty - ay
     dist = (dx * dx + dy * dy) ** 0.5
     if dist < 1e-6:

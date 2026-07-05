@@ -31,8 +31,11 @@
 # }
 
 import json
+import os
 
 import pygame as pg
+
+from config import TILE_LENGTH, TILES_DIR
 
 
 def slice_cell(sheet: pg.Surface, x: int, y: int, w: int, h: int) -> pg.Surface:
@@ -54,7 +57,28 @@ def load_sprites(config_file: str) -> dict[str, pg.Surface]:
     files = config.get('files')
     if files:
         sprites.update(_load_files(files))
+    _autoscan_tiles(sprites)
     return sprites
+
+
+def _autoscan_tiles(sprites: dict[str, pg.Surface]) -> None:
+    # convention: any src/data/sprites/tiles/<id>.png (or <id>_tile.png) is
+    # auto-registered as sprite-id <id>, scaled to one tile, UNLESS an explicit
+    # atlas/files entry already defines that id (which wins — e.g. oversized
+    # building sprites like factory/exchange that live here but need their own
+    # size). lets a new terrain/ore tile be added by just dropping a 64x64 png,
+    # with no sprites.json edit.
+    if not os.path.isdir(TILES_DIR):
+        return
+    for fn in os.listdir(TILES_DIR):
+        if not fn.endswith('.png'):
+            continue
+        stem = fn[:-4]
+        sprite_id = stem[:-5] if stem.endswith('_tile') else stem
+        if sprite_id in sprites:
+            continue
+        surf = pg.image.load(os.path.join(TILES_DIR, fn)).convert_alpha()
+        sprites[sprite_id] = _scale_cover(surf, (TILE_LENGTH, TILE_LENGTH))
 
 
 def _load_atlas(spec: dict) -> dict[str, pg.Surface]:

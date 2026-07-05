@@ -7,7 +7,7 @@
     "shadow": false,
     "sprite_size": [128, 128],
     "hitbox": [40, 72],
-    "drops": [{"item": "coin", "quantity": [3, 7]}],
+    "drops": [{"item": "coin", "quantity": [3, 7]}, {"item": "pendant", "quantity": 1, "chance": 0.1}],
     "animation": {
         "default_state": "idle",
         "states": {
