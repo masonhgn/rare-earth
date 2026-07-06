@@ -141,13 +141,9 @@ def _apply_overlay(world, minimap, changes) -> None:
 
 
 def _build_world(world, wd, local_id) -> None:
-    world.width, world.height = wd['width'], wd['height']
-    world.map_grid = _rle_decode(wd['map_grid'], world.width, world.height)
-    world.overlay_grid = _rle_decode(wd['overlay_grid'], world.width, world.height)
-    world.entities.clear()
-    world.tile_index.clear()
-    world.dropped.clear()
-    world.spatial_grid.clear()
+    w, h = wd['width'], wd['height']
+    world.load_grids(w, h, _rle_decode(wd['map_grid'], w, h),
+                     _rle_decode(wd['overlay_grid'], w, h))
     _apply_entities(world, wd['ents'], local_id)
     _apply_dropped(world, wd['dropped'])
 

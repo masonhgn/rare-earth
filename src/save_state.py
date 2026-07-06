@@ -380,14 +380,9 @@ def _apply_world(w, wd: dict, now_ms: int) -> None:
     # wipe the world and repopulate grids + placed entities + dropped items
     # from a saved `world` blob. shared by load_game and load_world. width/height
     # first — the RLE grid decode needs them to reshape rows.
-    w.width = wd['width']
-    w.height = wd['height']
-    w.map_grid = _rle_decode(wd['map_grid'], w.width, w.height)
-    w.overlay_grid = _rle_decode(wd['overlay_grid'], w.width, w.height)
-    w.entities.clear()
-    w.tile_index.clear()
-    w.dropped.clear()
-    w.spatial_grid.clear()
+    width, height = wd['width'], wd['height']
+    w.load_grids(width, height, _rle_decode(wd['map_grid'], width, height),
+                 _rle_decode(wd['overlay_grid'], width, height))
 
     # placed entities keep their original ids so future save references stay stable.
     for e_data in wd['entities']:

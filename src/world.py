@@ -95,6 +95,21 @@ class World:
             for _ in range(count):
                 self._scatter_patch(tile_id, max_radius)
 
+    def load_grids(self, width: int, height: int, map_grid, overlay_grid) -> None:
+        # install a new (already-decoded) terrain map and wipe all placed-entity
+        # and dropped-item state, ready to repopulate. the single reset shared by
+        # the save loader and the net-client join, so a new per-world collection
+        # is cleared in one place. callers decode the RLE grids themselves (that
+        # codec lives with save_state).
+        self.width = width
+        self.height = height
+        self.map_grid = map_grid
+        self.overlay_grid = overlay_grid
+        self.entities.clear()
+        self.tile_index.clear()
+        self.dropped.clear()
+        self.spatial_grid.clear()
+
     def _scatter_patch(self, tile_id: str, max_radius: int) -> None:
         cx = random.randint(0, self.width - 1)
         cy = random.randint(0, self.height - 1)
