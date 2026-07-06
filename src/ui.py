@@ -13,6 +13,7 @@
 
 import pygame as pg
 
+import slots as slot_ops
 from resources import load_image
 from ui_theme import (
     COLOR_BUTTON_BG, COLOR_BUTTON_BG_DISABLED, COLOR_BUTTON_BORDER,
@@ -232,30 +233,11 @@ class SlotGrid:
 
     def handle_click(self, idx: int | None, held: dict | None, slots: list, *,
                      take_only: bool = False) -> dict | None:
-        # mirrors Inventory.handle_click — pick / place / merge / swap.
-        # mutates `slots` in place; returns the new held_item.
-        # take_only slots (factory outputs) ignore a held stack: you can
-        # only pull from them, never deposit.
-        if idx is None or idx < 0 or idx >= len(slots):
-            return held
-        if take_only and held is not None:
-            return held
-        slot = slots[idx]
-        if held is None:
-            if slot is None:
-                return None
-            slots[idx] = None
-            return slot
-        if slot is None or slot['item_id'] == held['item_id']:
-            if slot is None:
-                slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
-            else:
-                slot['quantity'] += held['quantity']
-            return None
-        # different item: swap
-        new_held = slot
-        slots[idx] = {'item_id': held['item_id'], 'quantity': held['quantity']}
-        return new_held
+        # pick / place / merge / swap for one slot click. delegates to
+        # slots.click so the mutation logic lives in exactly one place — the
+        # same headless path the authoritative server runs. this widget keeps
+        # only geometry (slot_at_pixel) + rendering.
+        return slot_ops.click(slots, idx, held, take_only=take_only)
 
 
 class ScrollList:

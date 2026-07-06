@@ -95,8 +95,9 @@ COIN = 'coin'
 
 def click(slots: list, idx, held: dict | None, take_only: bool = False) -> dict | None:
     # pick / place / merge / swap for one slot click. mutates `slots` in place,
-    # returns the new held stack. mirrors ui.SlotGrid.handle_click so the
-    # authoritative server can run inventory drag-drop without the UI widget.
+    # returns the new held stack. the canonical implementation: ui.SlotGrid
+    # (the widget) delegates here, and the authoritative server calls it
+    # directly to run inventory drag-drop without the UI widget.
     if idx is None or idx < 0 or idx >= len(slots):
         return held
     if take_only and held is not None:
