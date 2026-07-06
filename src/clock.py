@@ -26,3 +26,9 @@ class DayClock:
         if current != self._last_day:
             self._last_day = current
             self.on_rollover(current)
+
+    def set_day(self, day: int) -> None:
+        # jump straight to the start of `day` (dev console). resync _last_day
+        # so this manual jump doesn't fire on_rollover on the next tick.
+        self.elapsed = (day - 1) * DAY_LENGTH_SEC
+        self._last_day = self.day

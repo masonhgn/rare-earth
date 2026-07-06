@@ -10,10 +10,14 @@
 # layers (terrain -> overlay -> shadow -> dropped -> entity -> player ->
 # highlight), then the screen-space ui is drawn directly on top.
 
+import os
+
 import pygame as pg
 
-from config import TILE_LENGTH, TITLE
+from config import TILE_LENGTH, TITLE, DAY_LENGTH_SEC, ITEMS_DIR
 from world import World, world_to_tile
+from entity import Entity
+from prototype import load_prototype
 from item import load_item
 from render import Screen, Minimap, WorldRenderer, MapView
 from inventory import Inventory
@@ -137,6 +141,12 @@ class Game:
         self.dev_console = DevConsole({
             'tp': (self._cmd_teleport, 'tp <tileX> <tileY>'),
             'teleport': (self._cmd_teleport, 'teleport <tileX> <tileY>'),
+            'give': (self._cmd_give, 'give <item_id> [qty]'),
+            'items': (self._cmd_items, 'items'),
+            'spawn': (self._cmd_spawn, 'spawn <entity_id> [n]'),
+            'heal': (self._cmd_heal, 'heal'),
+            'sethp': (self._cmd_sethp, 'sethp <n>'),
+            'day': (self._cmd_day, 'day [n]'),
             'help': (self._cmd_help, 'help'),
         })
 
@@ -552,3 +562,92 @@ class Game:
 
     def _cmd_help(self, args):
         return 'commands: ' + ', '.join(sorted(self.dev_console.commands))
+
+    def _cmd_give(self, args):
+        if not args:
+            return 'usage: give <item_id> [qty]'
+        item_id = args[0]
+        qty = 1
+        if len(args) >= 2:
+            try:
+                qty = int(args[1])
+            except ValueError:
+                return 'give: qty must be an integer'
+        if qty <= 0:
+            return 'give: qty must be positive'
+        try:
+            load_item(item_id)   # raises if the item json is missing
+        except FileNotFoundError:
+            return f'give: unknown item "{item_id}"   (try "items")'
+        leftover = self.world.get_player().inventory.add_item(item_id, qty)
+        got = qty - leftover
+        msg = f'gave {got}x {item_id}'
+        if leftover:
+            msg += f'   ({leftover} did not fit)'
+        return msg
+
+    def _cmd_items(self, args):
+        ids = sorted(f[:-5] for f in os.listdir(ITEMS_DIR) if f.endswith('.json'))
+        return 'items: ' + ', '.join(ids)
+
+    def _cmd_spawn(self, args):
+        if not args:
+            return 'usage: spawn <entity_id> [n]'
+        proto_id = args[0]
+        n = 1
+        if len(args) >= 2:
+            try:
+                n = int(args[1])
+            except ValueError:
+                return 'spawn: n must be an integer'
+        if n <= 0:
+            return 'spawn: n must be positive'
+        try:
+            proto = load_prototype(proto_id)
+        except FileNotFoundError:
+            return f'spawn: unknown entity "{proto_id}"'
+        player = self.world.get_player()
+        spawned = 0
+        for i in range(n):
+            # scatter around the player so multiple spawns don't stack on one tile.
+            ox = (i % 3 - 1) * TILE_LENGTH
+            oy = (i // 3) * TILE_LENGTH
+            pos = (player.world_x + TILE_LENGTH + ox, player.world_y + oy)
+            try:
+                self.world.add_entity(Entity(proto, pos))
+                spawned += 1
+            except ValueError:
+                pass   # tile-locked footprint occupied; skip this one
+        return f'spawned {spawned}x {proto_id}' + ('' if spawned == n else f'   ({n - spawned} blocked)')
+
+    def _cmd_heal(self, args):
+        player = self.world.get_player()
+        if player.max_health is None:
+            return 'heal: player has no health'
+        player.health = player.max_health
+        return f'healed to {player.health}/{player.max_health}'
+
+    def _cmd_sethp(self, args):
+        if len(args) != 1:
+            return 'usage: sethp <n>'
+        player = self.world.get_player()
+        if player.max_health is None:
+            return 'sethp: player has no health'
+        try:
+            hp = int(args[0])
+        except ValueError:
+            return 'sethp: n must be an integer'
+        player.health = max(0, min(hp, player.max_health))
+        return f'health = {player.health}/{player.max_health}'
+
+    def _cmd_day(self, args):
+        if not args:
+            return f'day {self.day_clock.day}'
+        try:
+            n = int(args[0])
+        except ValueError:
+            return 'day: n must be an integer'
+        if n < 1:
+            return 'day: must be >= 1'
+        self.day_clock.set_day(n)
+        return f'day set to {self.day_clock.day}'
