@@ -32,6 +32,7 @@ import interaction
 import movement
 import netproto
 import slots as slot_ops
+import player_ops
 
 TICK_HZ = 20
 PLAYER_ATTACK_CD = 0.4      # seconds between a player's melee swings
@@ -404,9 +405,7 @@ class GameServer:
         # staged deposits aren't silently lost when the per-connection player is
         # removed; on death we keep the drop box (it's a bank-like staging area).
         at = p.center
-        for slot in p.inventory.slots:
-            if slot is not None:
-                self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
+        player_ops.spill_inventory_at_feet(self.sim.world, p)
         if p.held_item is not None:
             self.sim.world.spawn_dropped_item(p.held_item['item_id'], p.held_item['quantity'], at)
         if include_dropbox and p.exchange_state is not None:
@@ -415,14 +414,10 @@ class GameServer:
                     self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
 
     def _respawn(self, player) -> None:
-        w = self.sim.world
-        sw, sh = player.sprite_dims
         self._drop_player_goods(player)
         player.inventory.slots = [None] * len(player.inventory.slots)
         player.held_item = None
-        player.world_x = w.width * TILE_LENGTH / 2 - sw / 2
-        player.world_y = w.height * TILE_LENGTH / 2 - sh / 2
-        player.health = player.max_health
+        player_ops.recenter_at_full_health(self.sim.world, player)
         player.knockback_x = player.knockback_y = 0.0
         player.path = []
 

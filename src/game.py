@@ -41,6 +41,7 @@ import movement
 import input_handler
 import hud_render
 import worldgen
+import player_ops
 
 
 # how long the black "YOU DIED" screen holds before the player respawns.
@@ -326,17 +327,9 @@ class Game:
     def _respawn_player(self, player) -> None:
         # on death: drop the whole inventory where the player fell, then
         # respawn at the middle of the map at full health.
-        sw, sh = player.sprite_dims
-        death_pos = player.center
-        inv = player.inventory
-        for slot in inv.slots:
-            if slot is not None:
-                self.world.spawn_dropped_item(slot['item_id'], slot['quantity'], death_pos)
-        inv.slots = [None] * len(inv.slots)
-        # respawn centered on the map, full health, transient state cleared.
-        player.world_x = self.world.width * TILE_LENGTH / 2 - sw / 2
-        player.world_y = self.world.height * TILE_LENGTH / 2 - sh / 2
-        player.health = player.max_health
+        player_ops.spill_inventory_at_feet(self.world, player)
+        player.inventory.slots = [None] * len(player.inventory.slots)
+        player_ops.recenter_at_full_health(self.world, player)
         player.last_damage_ms = None
         player.knockback_x = player.knockback_y = 0.0
         player.path = []
