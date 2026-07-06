@@ -6,7 +6,7 @@
 import pygame as pg
 
 from config import TILE_LENGTH, DROPPED_ITEM_SIZE
-from item import load_item, format_quantity, get_item_icon
+from item import load_item
 from ui_theme import COLOR_SLOT_QTY_TEXT, get_font
 import hud_render
 

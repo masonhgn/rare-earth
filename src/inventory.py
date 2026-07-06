@@ -22,7 +22,6 @@ from config import (
 from resources import load_image
 from ui import SlotGrid
 from ui_theme import get_font
-import slots as slot_ops
 
 
 class Inventory:

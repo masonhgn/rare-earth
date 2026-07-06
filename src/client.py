@@ -33,14 +33,13 @@ from exchange import ExchangePanel
 from factory import FactoryPanel
 from spot_market import SpotMarket, HISTORY_LEN
 from clock import DayClock
-from item import DroppedItem, get_item_icon, load_item, format_quantity
+from item import DroppedItem
 from save_state import _rle_decode
 from settings import load_settings
 from display import DisplayService
 from settings_panel import SettingsPanel
 from hud import Hud
 from hud_tabs import HudTabs
-from ui_theme import get_font
 import hud_render
 import interaction
 import movement
@@ -314,6 +313,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         except OSError:
             pass
     net_spot = _NetSpotMarket(_send_trade)
+    # seed prices from the join snapshot so a freshly-joined client shows real
+    # prices immediately, instead of blanks until the first per-tick snapshot.
+    net_spot.apply_prices(welcome['world'].get('spot_prices', {}))
 
     def _send_intent(msg):
         try:

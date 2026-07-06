@@ -6,6 +6,7 @@
 
 import pygame as pg
 
+from config import SCREEN_WIDTH, SCREEN_HEIGHT
 from titlescreen import show_title
 from worldselect import show_world_select
 
@@ -21,7 +22,7 @@ def main() -> None:
         while True:
             # (re)acquire the window each pass — a game/client may have reopened
             # the display at a different size, invalidating the old surface.
-            surface = pg.display.set_mode((1280, 720))
+            surface = pg.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
             choice = show_title(surface)
             if choice is None:
                 return

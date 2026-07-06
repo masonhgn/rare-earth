@@ -15,7 +15,7 @@ import os
 import pygame as pg
 
 from config import TILE_LENGTH, TITLE, DAY_LENGTH_SEC, ITEMS_DIR
-from world import World, world_to_tile
+from world import World
 from entity import Entity
 from prototype import load_prototype
 from item import load_item

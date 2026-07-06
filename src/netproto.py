@@ -6,12 +6,13 @@
 # JSON body. JSON is plenty for this world's size; a binary/delta format is a
 # later optimization (Phase 4) if bandwidth ever matters.
 #
-# message types:
-#   server -> client:
-#     {type:'welcome', player_id, world:{...}}   once, on connect (join snapshot)
-#     {type:'snapshot', ents:[...], dropped:[...]}   every server tick
-#   client -> server:
-#     {type:'move', dx, dy}    held movement direction in {-1,0,1}
+# message types (the full set is authoritative in the code, not here):
+#   server -> client: 'welcome' (join snapshot: player_id + world{...}) once on
+#     connect; 'snapshot' (ents/dropped/overlay/prices/day_elapsed) every tick;
+#     plus 'inv', 'exchange', 'machine' pushed per viewer when they change.
+#   client -> server: movement ('move') + intents validated in
+#     server.handle_client (break/place/attack/trade/inv_click/drop/accept/
+#     cancel/dropbox/machine_click/open_machine/close_machine).
 
 import asyncio
 import json

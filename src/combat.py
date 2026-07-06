@@ -27,9 +27,6 @@ HEALTH_BAR_VISIBLE_MS = 6000
 FLOAT_LIFETIME_MS = 850
 FLOAT_RISE_PX = 30
 
-_BAR_W = 44
-_BAR_H = 5
-
 
 @dataclass
 class DamageNumber:
