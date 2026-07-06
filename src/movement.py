@@ -12,6 +12,11 @@ from config import TILE_LENGTH
 KNOCKBACK_DECAY = 14.0                            # per-second decay (higher = fades faster)
 KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY   # initial px/s; ~1 tile of total travel
 
+# diagonal movement normalization (1/sqrt(2)) so 45deg movement isn't sqrt(2)
+# faster than cardinal. shared by the SP input poller and the server/client
+# movement steps, which must stay bit-identical for prediction to reconcile.
+DIAG = 0.7071067811865475
+
 
 def _blocked(world, entity) -> bool:
     # True if `entity`'s hitbox overlaps a solid (tile-locked) entity's
@@ -48,6 +53,19 @@ def move_axis(world, entity, dx: float, dy: float) -> tuple[float, float]:
         else:
             moved_y = dy
     return moved_x, moved_y
+
+
+def input_delta(entity, dx: float, dy: float, dt: float) -> tuple[float, float]:
+    # convert a raw input direction (each axis in {-1, 0, 1}) into the pixel
+    # (dx, dy) to move this frame: normalize diagonals via DIAG, then scale by
+    # the entity's speed. the single source of truth for the three movement
+    # paths (input_handler.poll_movement, server tick, client prediction) so
+    # they can't drift.
+    if dx and dy:
+        dx *= DIAG
+        dy *= DIAG
+    speed = entity.prototype.speed or 0.0
+    return dx * speed * dt, dy * speed * dt
 
 
 def _solid_blocked(world, entity) -> bool:

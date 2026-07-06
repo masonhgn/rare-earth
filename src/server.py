@@ -34,7 +34,6 @@ import netproto
 import slots as slot_ops
 
 TICK_HZ = 20
-DIAG = 0.7071067811865475   # diagonal movement normalization (matches client)
 PLAYER_ATTACK_CD = 0.4      # seconds between a player's melee swings
 DEATH_SCREEN_SEC = 2.0      # dead players freeze (hp 0) this long before respawn
 SAVE_INTERVAL = 60.0        # seconds between shared-world autosaves
@@ -200,11 +199,8 @@ class GameServer:
             dx, dy = conn.move_dir
             if dx or dy:
                 p.path = []
-                if dx and dy:
-                    dx *= DIAG
-                    dy *= DIAG
-                speed = p.prototype.speed or 0.0
-                movement.move_axis(self.sim.world, p, dx * speed * dt, dy * speed * dt)
+                mx, my = movement.input_delta(p, dx, dy, dt)
+                movement.move_axis(self.sim.world, p, mx, my)
             movement.apply_knockback(self.sim.world, p, dt)
             movement.clamp_to_bounds(self.sim.world, p)
 

@@ -15,6 +15,7 @@ from pathfinding import find_path
 from prototype import load_prototype
 from world import world_to_tile, tile_center
 import interaction
+import movement
 
 
 # offset for centering the held item icon on the cursor
@@ -109,14 +110,7 @@ def poll_movement(player, dt: float) -> tuple[float, float]:
     if keys[pg.K_d]:
         vx += 1
 
-    # diagonal normalization so 45deg movement isn't sqrt(2) faster
-    if vx != 0 and vy != 0:
-        inv = 0.7071067811865475
-        vx *= inv
-        vy *= inv
-
-    speed = player.prototype.speed or 0.0
-    return vx * speed * dt, vy * speed * dt
+    return movement.input_delta(player, vx, vy, dt)
 
 
 def event_loop(game) -> None:

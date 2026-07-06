@@ -45,7 +45,6 @@ import interaction
 import movement
 import netproto
 
-DIAG = 0.7071067811865475   # diagonal movement normalization (matches server)
 PREDICT_CORRECT = 10.0      # per-second rate the local player eases to server truth
 INTERP_RATE = 12.0          # per-second rate remote entities ease to their target
 SNAP_DIST = 96.0            # local desync past this snaps instead of easing (respawn/teleport)
@@ -164,11 +163,8 @@ def _step_local(world, local_id, move_dir, dt) -> None:
     ox, oy = p.world_x, p.world_y
     dx, dy = move_dir
     if dx or dy:
-        if dx and dy:
-            dx *= DIAG
-            dy *= DIAG
-        speed = p.prototype.speed or 0.0
-        movement.move_axis(world, p, dx * speed * dt, dy * speed * dt)
+        mx, my = movement.input_delta(p, dx, dy, dt)
+        movement.move_axis(world, p, mx, my)
     t = min(1.0, PREDICT_CORRECT * dt)
     p.world_x += (p.net_x - p.world_x) * t
     p.world_y += (p.net_y - p.world_y) * t
