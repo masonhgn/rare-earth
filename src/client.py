@@ -541,8 +541,7 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                 fms['elapsed_ms'] = fms.get('elapsed_ms', 0.0) + dt * 1000.0
 
         if player is not None:
-            sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-            screen.camera.follow((player.world_x, player.world_y), sprite_size=(sw, sh))
+            screen.camera.follow((player.world_x, player.world_y), sprite_size=player.sprite_dims)
 
         screen.clear()
         world_renderer.flush(screen.camera, screen.culling, None)
@@ -558,10 +557,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                    n_entities=len(world.entities), n_dropped=len(world.dropped))
         hud.render_day_counter(screen.surface, day=day_clock.day)
         if player is not None:
-            sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
             minimap.render(
                 screen.surface, (screen.width, screen.height), screen.camera.offset,
-                (player.world_x + sw / 2, player.world_y + sh / 2),
+                player.center,
             )
             inventory.render(screen.surface)
         hud_tabs.render(screen.surface)

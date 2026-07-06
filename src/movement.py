@@ -143,7 +143,6 @@ def follow_path(entity, world, dt: float, speed: float | None = None) -> tuple[f
     # other living things. returns the total (dx, dy) actually applied, used by
     # update_player_animation. generic over any entity with
     # .path/.world_x/.world_y/.prototype, so both the player and MobSystem use it.
-    sprite_w, sprite_h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
     if speed is None:
         speed = entity.prototype.speed or 0.0
     step_remaining = speed * dt
@@ -152,8 +151,7 @@ def follow_path(entity, world, dt: float, speed: float | None = None) -> tuple[f
         wp_tx, wp_ty = entity.path[0]
         target_x = wp_tx * TILE_LENGTH + TILE_LENGTH / 2
         target_y = wp_ty * TILE_LENGTH + TILE_LENGTH / 2
-        center_x = entity.world_x + sprite_w / 2
-        center_y = entity.world_y + sprite_h / 2
+        center_x, center_y = entity.center
         dx = target_x - center_x
         dy = target_y - center_y
         dist = (dx * dx + dy * dy) ** 0.5
@@ -198,7 +196,7 @@ def clamp_to_bounds(world, entity) -> None:
     # keep an entity's *hitbox* inside the map rectangle. clamping the full
     # 128x128 sprite frame would stop it ~40px before the visible body reaches
     # the edge (most of the frame is transparent padding). matches hitbox_rect.
-    sprite_w, sprite_h = entity.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+    sprite_w, sprite_h = entity.sprite_dims
     hitbox_w, hitbox_h = entity.prototype.hitbox or (sprite_w, sprite_h)
     hx_off = (sprite_w - hitbox_w) / 2
     hy_off = sprite_h - hitbox_h

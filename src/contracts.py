@@ -183,11 +183,7 @@ class ContractSystem:
         if leftover > 0:
             # inventory rejected the full add (mismatched stacks fill it).
             # spit the rest at the player's feet so the payout isn't lost.
-            from config import TILE_LENGTH
-            sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-            cx = player.world_x + sw / 2
-            cy = player.world_y + sh / 2
-            self.world.spawn_dropped_item(item_id, leftover, (cx, cy))
+            self.world.spawn_dropped_item(item_id, leftover, player.center)
 
 
 def accept_contract(es: dict, board_index: int, inventory, current_day: int) -> bool:

@@ -123,12 +123,19 @@ class Entity:
         return (int(self.world_x // TILE_LENGTH), int(self.world_y // TILE_LENGTH))
 
     @property
+    def sprite_dims(self) -> tuple[int, int]:
+        # rendered sprite size in pixels (w, h), defaulting to one tile. the
+        # raw dims for callers that need them directly (camera follow, tile-
+        # centering, hitbox math) rather than the derived center below.
+        return self.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+
+    @property
     def center(self) -> tuple[float, float]:
         # the entity's visual center in world pixels (sprite midpoint), the
         # canonical "where is this thing" point for reach / distance / aggro /
         # targeting. accounts for oversized frames (a 128x128 sprite on a 64px
         # tile). previously re-derived as a private helper in five modules.
-        w, h = self.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        w, h = self.sprite_dims
         return (self.world_x + w / 2, self.world_y + h / 2)
 
     @property
@@ -164,7 +171,7 @@ class Entity:
         # to it and positioned bottom-center within the sprite frame (so
         # the character's feet sit on the rect bottom). otherwise it spans
         # the full sprite frame.
-        sprite_w, sprite_h = self.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        sprite_w, sprite_h = self.sprite_dims
         if self.prototype.hitbox is None:
             return pg.Rect(int(self.world_x), int(self.world_y), sprite_w, sprite_h)
         hw, hh = self.prototype.hitbox

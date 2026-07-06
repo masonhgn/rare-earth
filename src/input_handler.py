@@ -328,9 +328,7 @@ def _on_left_click(game, event) -> None:
 
     # plan the path
     player = game.world.get_player()
-    sprite_w, sprite_h = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-    player_tile = world_to_tile((player.world_x + sprite_w / 2, player.world_y + sprite_h / 2))
-    path = find_path(game.world, player_tile, walk_target)
+    path = find_path(game.world, player.center_tile, walk_target)
     if path is None:
         return
     player.path = path

@@ -461,8 +461,7 @@ class MapView:
             mx, my = to_screen(mob.world_x, mob.world_y)
             pg.draw.circle(target, (230, 60, 60), (mx, my), 4)
         player = world.get_player()
-        psw, psh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        px, py = to_screen(player.world_x + psw / 2, player.world_y + psh / 2)
+        px, py = to_screen(*player.center)
         pg.draw.circle(target, (255, 230, 70), (px, py), 5)
 
         # title + hint

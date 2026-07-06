@@ -5,7 +5,7 @@
 
 import pygame as pg
 
-from config import TILE_LENGTH, DROPPED_ITEM_SIZE
+from config import DROPPED_ITEM_SIZE
 from item import load_item
 from ui_theme import COLOR_SLOT_QTY_TEXT, get_font
 import hud_render
@@ -89,8 +89,7 @@ class HudOverlay:
         player = game.world.get_player()
         # use the player's visual center, not the sprite top-left, so the
         # marker tracks where the character actually is.
-        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        center = (player.world_x + sw / 2, player.world_y + sh / 2)
+        center = player.center
         game.minimap.render(
             game.screen.surface,
             (game.screen.width, game.screen.height),

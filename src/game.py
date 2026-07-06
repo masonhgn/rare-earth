@@ -255,10 +255,7 @@ class Game:
         )
         if leftover > 0:
             player = self.world.get_player()
-            sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-            cx = player.world_x + sw / 2
-            cy = player.world_y + sh / 2
-            self.world.spawn_dropped_item(self.held_item['item_id'], leftover, (cx, cy))
+            self.world.spawn_dropped_item(self.held_item['item_id'], leftover, player.center)
         self.held_item = None
 
     def _position_inventory(self) -> None:
@@ -321,9 +318,7 @@ class Game:
         if self.map_view.open:
             return
         player = self.world.get_player()
-        psw = (player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH))[0]
-        tsw = (target.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH))[0]
-        facing = 'left' if (target.world_x + tsw / 2) < (player.world_x + psw / 2) else 'right'
+        facing = 'left' if target.center[0] < player.center[0] else 'right'
         self.start_attack(facing)
         movement.knock_back(player, target)
         self.combat.hit(target, pg.time.get_ticks())
@@ -331,8 +326,8 @@ class Game:
     def _respawn_player(self, player) -> None:
         # on death: drop the whole inventory where the player fell, then
         # respawn at the middle of the map at full health.
-        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        death_pos = (player.world_x + sw / 2, player.world_y + sh / 2)
+        sw, sh = player.sprite_dims
+        death_pos = player.center
         inv = player.inventory
         for slot in inv.slots:
             if slot is not None:
@@ -464,8 +459,7 @@ class Game:
 
         # camera follows the player, accounting for sprite size so the player
         # appears centered (not anchored at top-left).
-        sprite_size = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=sprite_size)
+        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=player.sprite_dims)
 
         # auto-pickup drops whose rect overlaps the player's hitbox rect.
         picked = self.world.collect_dropped_in_rect(player.hitbox_rect())
@@ -551,7 +545,7 @@ class Game:
         if not self.world.in_bounds_tile(tx, ty):
             return f'tp: ({tx}, {ty}) out of bounds (0..{self.world.width - 1}, 0..{self.world.height - 1})'
         player = self.world.get_player()
-        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        sw, sh = player.sprite_dims
         # center the sprite on the target tile's center.
         player.world_x = tx * TILE_LENGTH + TILE_LENGTH / 2 - sw / 2
         player.world_y = ty * TILE_LENGTH + TILE_LENGTH / 2 - sh / 2

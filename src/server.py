@@ -407,8 +407,7 @@ class GameServer:
         # on disconnect we also spill their drop box (include_dropbox=True) so
         # staged deposits aren't silently lost when the per-connection player is
         # removed; on death we keep the drop box (it's a bank-like staging area).
-        sw, sh = p.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
-        at = (p.world_x + sw / 2, p.world_y + sh / 2)
+        at = p.center
         for slot in p.inventory.slots:
             if slot is not None:
                 self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
@@ -421,7 +420,7 @@ class GameServer:
 
     def _respawn(self, player) -> None:
         w = self.sim.world
-        sw, sh = player.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+        sw, sh = player.sprite_dims
         self._drop_player_goods(player)
         player.inventory.slots = [None] * len(player.inventory.slots)
         player.held_item = None
