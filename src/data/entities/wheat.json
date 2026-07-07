@@ -1,0 +1,12 @@
+{
+    "grid": [["wheat_1"]],
+    "tile_locked": true,
+    "editable": true,
+    "break_time": 0.4,
+    "plant_on": "grass",
+    "crop": {
+        "stages": ["wheat_1", "wheat_2", "wheat_3", "wheat_4"],
+        "harvest": {"item": "wheat", "quantity": 2},
+        "seed": {"item": "wheat_seed", "quantity": 1}
+    }
+}

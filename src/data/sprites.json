@@ -40,6 +40,22 @@
             "file": "src/data/sprites/tiles/haldrite_ore_tile.png",
             "size": [64, 64]
         },
+        "wheat_1": {
+            "file": "src/data/sprites/tiles/wheat/1.png",
+            "size": [64, 64]
+        },
+        "wheat_2": {
+            "file": "src/data/sprites/tiles/wheat/2.png",
+            "size": [64, 64]
+        },
+        "wheat_3": {
+            "file": "src/data/sprites/tiles/wheat/3.png",
+            "size": [64, 64]
+        },
+        "wheat_4": {
+            "file": "src/data/sprites/tiles/wheat/4.png",
+            "size": [64, 64]
+        },
         "factory": {
             "file": "src/data/sprites/tiles/factory.png",
             "size": [768, 512]

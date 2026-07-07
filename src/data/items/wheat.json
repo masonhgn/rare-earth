@@ -1,0 +1,6 @@
+{
+    "id": "wheat",
+    "name": "Wheat",
+    "image": "src/data/sprites/tiles/wheat/4.png",
+    "spot_price": 5
+}

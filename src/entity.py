@@ -58,6 +58,11 @@ class Entity:
                 # so it serializes / networks with no wall-clock rebasing.
                 'elapsed_ms': 0.0,
             }
+        if prototype.crop is not None:
+            # growth stage index into prototype.crop['stages'], advanced one
+            # step per in-game day by CropSystem. planted crops start as a
+            # fresh sprout (stage 0).
+            self.components['crop'] = {'stage': 0}
         if prototype.mob is not None:
             # ai state for MobSystem: wander/chase + cooldown timers. the
             # walking route itself lives on self.path (shared with the
@@ -128,6 +133,16 @@ class Entity:
         # raw dims for callers that need them directly (camera follow, tile-
         # centering, hitbox math) rather than the derived center below.
         return self.prototype.sprite_size or (TILE_LENGTH, TILE_LENGTH)
+
+    @property
+    def render_grid(self):
+        # the sprite grid to draw this frame. normally the frozen prototype
+        # grid, but a growing crop renders its current-stage sprite so a single
+        # entity walks through its growth frames without swapping prototypes.
+        crop = self.components.get('crop')
+        if crop is not None:
+            return [[self.prototype.crop['stages'][crop['stage']]]]
+        return self.prototype.grid
 
     @property
     def center(self) -> tuple[float, float]:

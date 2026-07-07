@@ -69,7 +69,10 @@ def can_place(world, player, tile, held) -> bool:
     # item is placeable and the tile is a valid, in-reach, empty target: in
     # bounds, no overlay feature, no entity, walkable, within reach, and not
     # the tile under the player's own feet. INCLUDES the reach check.
-    if held is None or load_item(held['item_id']).places is None:
+    if held is None:
+        return False
+    item = load_item(held['item_id'])
+    if item.places is None:
         return False
     tx, ty = tile
     if not world.in_bounds_tile(tx, ty):
@@ -83,5 +86,10 @@ def can_place(world, player, tile, held) -> bool:
     if not in_reach(player, tx, ty):
         return False
     if (tx, ty) == player.center_tile:
+        return False
+    # terrain-restricted placeables (crops) only go on their required base
+    # tile — e.g. wheat only on grass. other placeables have plant_on=None.
+    placed = load_prototype(item.places)
+    if placed.plant_on is not None and world.base_at(tx, ty) != placed.plant_on:
         return False
     return True

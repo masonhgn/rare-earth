@@ -572,7 +572,7 @@ class WorldRenderer:
         # culling + flash use the actual image size so oversized file sprites
         # (e.g. a 128x128 tree in a 1x1 grid) aren't cut off and their break
         # flash covers the whole sprite, not just a 64x64 corner.
-        for r, row in enumerate(proto.grid):
+        for r, row in enumerate(entity.render_grid):
             for c, sprite_id in enumerate(row):
                 img = sprites.get(sprite_id)
                 if img is None:

@@ -98,6 +98,16 @@ class EntityPrototype:
     # mobs also set tile_locked=False + a top-level `speed` (chase speed).
     mob: dict | None = None
 
+    # optional crop spec: {"stages": [sprite_id, ...], "harvest": {item, quantity},
+    # "seed": {item, quantity}}. when set, Entity gets a 'crop' component and
+    # CropSystem advances its growth stage one step per in-game day; the rendered
+    # sprite tracks the current stage (see Entity.render_grid).
+    crop: dict | None = None
+
+    # terrain restriction for placement: the base map tile this entity may be
+    # placed on (e.g. "grass" for crops). None = placeable on any valid tile.
+    plant_on: str | None = None
+
 
 _cache: dict[str, EntityPrototype] = {}
 

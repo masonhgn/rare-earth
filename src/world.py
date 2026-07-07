@@ -22,6 +22,7 @@ from config import TILE_LENGTH, PLAYER_SPAWN, PLAYER_REACH_TILES, ITEM_STACK_DIS
 from entity import Entity
 from prototype import load_prototype
 from item import DroppedItem, load_item, roll_drops
+import crop as crop_ops
 
 
 def world_to_tile(world_pos: tuple[float, float]) -> tuple[int, int]:
@@ -182,6 +183,13 @@ class World:
         if not self.in_bounds_tile(tx, ty):
             return None
         return self.overlay_grid[ty][tx]
+
+    def base_at(self, tx: int, ty: int) -> str | None:
+        # the base terrain sprite_id at the tile (map_grid layer), or None out
+        # of bounds. used to gate crop planting to specific ground (e.g. grass).
+        if not self.in_bounds_tile(tx, ty):
+            return None
+        return self.map_grid[ty][tx]
 
     def tile_in_reach(self, tx: int, ty: int, max_dist: int = PLAYER_REACH_TILES) -> bool:
         # single-player convenience: reach measured from the fixed 'player'
@@ -344,6 +352,11 @@ class World:
         entity = self.entities.get(entity_id)
         if entity is None or not entity.prototype.editable:
             return []
-        drops = roll_drops(entity.prototype.drops)
+        crop = entity.components.get('crop')
+        if crop is not None:
+            # crops harvest stage-gated: mature -> grain + seed, else seed back.
+            drops = crop_ops.harvest_drops(entity.prototype.crop, crop['stage'])
+        else:
+            drops = roll_drops(entity.prototype.drops)
         self.remove_entity(entity_id)
         return drops

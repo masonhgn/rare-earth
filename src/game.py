@@ -34,6 +34,7 @@ from hud_tabs import HudTabs
 from display import DisplayService
 from spot_market import SpotMarket
 from contracts import ContractSystem, ensure_board
+from crop import CropSystem
 from clock import DayClock
 from dev_console import DevConsole
 from save_state import save_game, load_game, save_exists
@@ -98,6 +99,8 @@ class Game:
         self.spot_market = SpotMarket()
         # contract system: settles active contracts on day rollover.
         self.contract_system = ContractSystem(self.world)
+        # crop system: grows planted crops one stage per in-game day.
+        self.crop_system = CropSystem(self.world)
         # global day clock. on_rollover triggers contract settlement +
         # autosave; constructed here so we can pass it to ExchangePanel.
         self.day_clock = DayClock()
@@ -382,6 +385,9 @@ class Game:
         # settle any forward contracts whose due_day has arrived. fires
         # before autosave so the resolved outcomes are what gets written.
         self.contract_system.settle_day_rollover(new_day)
+        # grow every planted crop one stage. also before autosave so the new
+        # growth stage is what gets persisted.
+        self.crop_system.advance_day()
         # autosave on every day boundary. quick, since the save is a
         # single json blob and the day clock only ticks once per ~120s.
         save_game(self)

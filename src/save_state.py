@@ -221,9 +221,20 @@ def _apply_mob(target: dict, saved: dict, now_ms: int) -> None:
     pass
 
 
+def _ser_crop(state: dict, now_ms: int) -> dict:
+    # growth stage is a plain index; round-trips as-is so a saved field survives
+    # reload (autosave fires on the same day rollover that advances growth).
+    return {'stage': state['stage']}
+
+
+def _apply_crop(target: dict, saved: dict, now_ms: int) -> None:
+    target['stage'] = saved.get('stage', 0)
+
+
 _COMPONENT_CODECS = {
     'machine': (_ser_machine, _apply_machine),
     'mob': (_ser_mob, _apply_mob),
+    'crop': (_ser_crop, _apply_crop),
 }
 
 
