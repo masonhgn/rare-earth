@@ -1,6 +1,6 @@
 {
     "id": "wheat_seed",
     "name": "Wheat Seeds",
-    "image": "src/data/sprites/tiles/wheat/1.png",
+    "image": "src/data/sprites/items/wheat_seeds.png",
     "places": "wheat"
 }
