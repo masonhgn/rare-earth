@@ -23,6 +23,10 @@ def main() -> None:
             # (re)acquire the window each pass — a game/client may have reopened
             # the display at a different size, invalidating the old surface.
             surface = pg.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+            # start every screen with key-repeat off; text fields turn it on only
+            # while focused, but a screen exited without blurring could leave it
+            # set and make gameplay KEYDOWNs machine-gun.
+            pg.key.set_repeat()
             choice = show_title(surface)
             if choice is None:
                 return

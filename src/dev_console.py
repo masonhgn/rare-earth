@@ -10,9 +10,11 @@
 
 import pygame as pg
 
-from ui_theme import get_font
+from ui_theme import get_mono_font
+from textfield import TextField
 
 
+_INPUT_COLOR = (235, 235, 180)
 _MAX_LOG = 6        # recent output lines kept on screen
 _MAX_SUGGEST = 6    # autocomplete rows shown at once
 _LINE_PAD = 2
@@ -24,50 +26,56 @@ class DevConsole:
         # commands: {name: (handler, usage_str)}
         self.commands = commands
         self.open = False
-        self.input = ''
+        # chromeless field: the console owns the prompt / panel layout; the
+        # field supplies the caret, selection, key-repeat and clipboard.
+        self.field = TextField(pg.Rect(0, 0, 10, 20), get_mono_font(18),
+                               chrome=False, color_text=_INPUT_COLOR)
         self.log: list[str] = []
         self._sel = 0   # highlighted autocomplete row (index into suggestions)
 
     def toggle(self) -> None:
         self.open = not self.open
-        if not self.open:
-            self.input = ''
+        if self.open:
+            self.field.focus()
+        else:
+            self.field.blur()
+            self.field.clear()
             self._sel = 0
 
-    # --- input: called for every KEYDOWN while open (swallows game controls) ---
+    # --- input: host forwards KEYDOWN + TEXTINPUT here while open ---
 
-    def handle_key(self, event) -> None:
-        key = event.key
-        if key in (pg.K_BACKQUOTE, pg.K_ESCAPE):
-            self.toggle()
-            return
-        if key == pg.K_TAB:
-            # autocomplete: fill in the highlighted suggestion + a trailing
-            # space so the next keystroke starts the arguments.
-            suggestions, _ = self._completions()
-            if suggestions:
-                self.input = suggestions[self._sel % len(suggestions)] + ' '
+    def handle_event(self, event) -> None:
+        if event.type == pg.KEYDOWN:
+            key = event.key
+            if key in (pg.K_BACKQUOTE, pg.K_ESCAPE):
+                self.toggle()
+                return
+            if key == pg.K_TAB:
+                # autocomplete: fill in the highlighted suggestion + a trailing
+                # space so the next keystroke starts the arguments.
+                suggestions, _ = self._completions()
+                if suggestions:
+                    self.field.set_text(suggestions[self._sel % len(suggestions)] + ' ')
+                    self._sel = 0
+                return
+            if key in (pg.K_UP, pg.K_DOWN):
+                # move the highlight through the suggestion list.
+                suggestions, _ = self._completions()
+                if suggestions:
+                    step = -1 if key == pg.K_UP else 1
+                    self._sel = (self._sel + step) % len(suggestions)
+                return
+            if key in (pg.K_RETURN, pg.K_KP_ENTER):
+                self._run(self.field.text.strip())
+                self.field.clear()
                 self._sel = 0
-            return
-        if key in (pg.K_UP, pg.K_DOWN):
-            # move the highlight through the suggestion list.
-            suggestions, _ = self._completions()
-            if suggestions:
-                step = -1 if key == pg.K_UP else 1
-                self._sel = (self._sel + step) % len(suggestions)
-            return
-        if key in (pg.K_RETURN, pg.K_KP_ENTER):
-            self._run(self.input.strip())
-            self.input = ''
-            self._sel = 0
-            return
-        if key == pg.K_BACKSPACE:
-            self.input = self.input[:-1]
-            self._sel = 0
-            return
-        ch = event.unicode
-        if ch and ch.isprintable() and ch != '`':
-            self.input += ch
+                return
+        # everything else — caret moves, backspace/delete, selection, clipboard,
+        # and TEXTINPUT insertion — is the field's; reset the suggestion
+        # highlight whenever the text actually changed.
+        before = self.field.text
+        self.field.handle_event(event)
+        if self.field.text != before:
             self._sel = 0
 
     def _completions(self) -> tuple[list[str], str | None]:
@@ -76,7 +84,7 @@ class DevConsole:
         # which Up/Down highlight and Tab completes. ONCE a command is chosen (a
         # space follows a known name, or the word is a unique exact match): its
         # usage string instead, to guide the arguments. only one is non-empty.
-        text = self.input
+        text = self.field.text
         if not text:
             return [], None
         if ' ' in text:
@@ -114,7 +122,7 @@ class DevConsole:
     def render(self, surface: pg.Surface) -> None:
         if not self.open:
             return
-        font = get_font(18)
+        font = get_mono_font(18)
         line_h = font.get_height() + _LINE_PAD
         log_lines = self.log[-_MAX_LOG:]
         suggestions, usage = self._completions()
@@ -144,4 +152,10 @@ class DevConsole:
         if usage:
             surface.blit(font.render('  ' + usage, True, (140, 155, 175)), (_MARGIN, y))
             y += line_h
-        surface.blit(font.render('> ' + self.input + '_', True, (235, 235, 180)), (_MARGIN, y))
+        # prompt drawn here; the field renders the editable text (caret +
+        # selection) immediately after it on the same baseline.
+        prompt = font.render('> ', True, _INPUT_COLOR)
+        surface.blit(prompt, prompt.get_rect(midleft=(_MARGIN, y + line_h // 2)))
+        px = _MARGIN + prompt.get_width()
+        self.field.rect = pg.Rect(px, y, surface.get_width() - px - _MARGIN, line_h)
+        self.field.draw(surface)

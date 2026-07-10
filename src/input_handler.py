@@ -121,11 +121,17 @@ def event_loop(game) -> None:
         elif event.type == pg.KEYDOWN:
             # the dev console captures all keys while open; backtick toggles it.
             if game.dev_console.open:
-                game.dev_console.handle_key(event)
+                game.dev_console.handle_event(event)
             elif event.key == pg.K_BACKQUOTE:
                 game.dev_console.toggle()
             else:
                 _on_keydown(game, event)
+
+        elif event.type == pg.TEXTINPUT:
+            # text entry (the real character stream) goes to the console field
+            # while it's open; ignored otherwise.
+            if game.dev_console.open:
+                game.dev_console.handle_event(event)
 
         elif event.type == pg.MOUSEBUTTONDOWN:
             if event.button == 1:

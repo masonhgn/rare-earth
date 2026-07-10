@@ -9,13 +9,33 @@
 # rather than appearance (cream, brown) so a palette swap is a one-line
 # change in this module instead of a project-wide search.
 
+import os
+
 import pygame as pg
+
+_FONT_DIR = os.path.join(os.path.dirname(__file__), 'data', 'fonts')
 
 
 def get_font(size: int) -> pg.font.Font:
     # single place the ui builds fonts, so swapping the default family for
     # a bundled TTF later is one edit here instead of a per-file search.
     return pg.font.Font(None, size)
+
+
+# cache keyed by size: Font construction reads the ttf off disk each call,
+# and text fields rebuild their font every frame, so memoize.
+_mono_cache: dict[int, pg.font.Font] = {}
+
+
+def get_mono_font(size: int) -> pg.font.Font:
+    # bundled monospace (DejaVu Sans Mono, OFL/public-domain) for anything
+    # where even glyph spacing matters: server-address fields, the dev
+    # console input, and other typed-text widgets.
+    font = _mono_cache.get(size)
+    if font is None:
+        font = pg.font.Font(os.path.join(_FONT_DIR, 'mono.ttf'), size)
+        _mono_cache[size] = font
+    return font
 
 
 # 9-slice panel art used by every modal. scale=0.5 in NineSliceSkin gets
