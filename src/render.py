@@ -19,6 +19,7 @@
 import math
 from collections import defaultdict
 
+import numpy as np
 import pygame as pg
 
 from config import (
@@ -269,21 +270,70 @@ MAP_TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
 _MAP_GREY = (130, 130, 150)
 
 
-def _block_color(world, px: int, py: int, tpp: int) -> tuple[int, int, int]:
-    # color for an overview pixel covering the tpp x tpp tile block at
-    # (px*tpp, py*tpp): prefer any overlay (ore) tile so downsampled patches
-    # still read; otherwise the block's first base tile.
-    x0, y0 = px * tpp, py * tpp
-    base = None
-    for ty in range(y0, min(y0 + tpp, world.height)):
-        orow = world.overlay_grid[ty]
-        brow = world.map_grid[ty]
-        for tx in range(x0, min(x0 + tpp, world.width)):
-            if orow[tx] is not None:
-                return MAP_TERRAIN_COLORS.get(orow[tx], _MAP_GREY)
-            if base is None:
-                base = brow[tx]
-    return MAP_TERRAIN_COLORS.get(base if base is not None else 'grass', _MAP_GREY)
+def _color_for(tile_id) -> tuple[int, int, int]:
+    return MAP_TERRAIN_COLORS.get(tile_id, _MAP_GREY)
+
+
+def _overview_rgb(world) -> np.ndarray:
+    # a 1px-per-tile RGB image of the whole map, overlay (ore) preferred over
+    # the base terrain, as an (H, W, 3) uint8 array. built by masking whole
+    # tile-id classes at once in C rather than the old per-cell python loop.
+    h, w = world.height, world.width
+    base = np.array(world.map_grid, dtype=object)          # (h, w) of str
+    over = np.array(world.overlay_grid, dtype=object)       # (h, w) of str | None
+    rgb = np.empty((h, w, 3), dtype=np.uint8)
+    rgb[...] = _MAP_GREY
+    for tid in set(base.flat):                              # ~a dozen distinct ids
+        rgb[base == tid] = _color_for(tid)
+    for tid in set(over.flat) - {None}:
+        rgb[over == tid] = _color_for(tid)
+    return rgb
+
+
+def _downsample_rgb(rgb: np.ndarray, tpp: int) -> np.ndarray:
+    # block-average an (H, W, 3) image by tpp so its longest edge fits a budget.
+    # crops the ragged remainder (< tpp) off the far edges — negligible at these
+    # scales and keeps the reshape exact.
+    if tpp <= 1:
+        return rgb
+    h, w = rgb.shape[0] // tpp, rgb.shape[1] // tpp
+    block = rgb[:h * tpp, :w * tpp].reshape(h, tpp, w, tpp, 3)
+    return block.mean(axis=(1, 3)).astype(np.uint8)
+
+
+def _surface_from_rgb(rgb: np.ndarray) -> pg.Surface:
+    # pygame.surfarray is (W, H, 3); our arrays are (H, W, 3) — transpose once.
+    return pg.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
+
+
+class WorldOverview:
+    # cached 1px/tile RGB image of the whole map, shared by the corner Minimap
+    # (a slice) and the full MapView (a downsample). replacing the old per-cell
+    # set_at loops with numpy slicing turns both into C-speed ops. `version`
+    # bumps on every tile edit so the MapView cache knows to rebuild.
+    def __init__(self, world):
+        self.world = world
+        self.rgb = _overview_rgb(world)
+        self.version = 0
+
+    def update_cell(self, tx: int, ty: int) -> None:
+        if 0 <= ty < self.world.height and 0 <= tx < self.world.width:
+            o = self.world.overlay_grid[ty][tx]
+            self.rgb[ty, tx] = _color_for(o if o is not None else self.world.map_grid[ty][tx])
+            self.version += 1
+
+    def rebuild(self) -> None:
+        self.rgb = _overview_rgb(self.world)
+        self.version += 1
+
+
+def get_overview(world) -> WorldOverview:
+    # lazily build + cache one overview per world (first minimap/map render).
+    ov = getattr(world, '_render_overview', None)
+    if ov is None:
+        ov = WorldOverview(world)
+        world._render_overview = ov
+    return ov
 
 
 def build_world_surface(world, max_px: int) -> tuple[pg.Surface, int]:
@@ -291,13 +341,8 @@ def build_world_surface(world, max_px: int) -> tuple[pg.Surface, int]:
     # the surface's longest edge stays <= max_px, bounding both its size and
     # build cost regardless of map dimensions. returns (surface, tpp).
     tpp = max(1, math.ceil(max(world.width, world.height) / max_px))
-    mw = max(1, math.ceil(world.width / tpp))
-    mh = max(1, math.ceil(world.height / tpp))
-    surf = pg.Surface((mw, mh))
-    for py in range(mh):
-        for px in range(mw):
-            surf.set_at((px, py), _block_color(world, px, py, tpp))
-    return surf, tpp
+    small = _downsample_rgb(_overview_rgb(world), tpp)
+    return _surface_from_rgb(small), tpp
 
 
 class Minimap:
@@ -319,30 +364,34 @@ class Minimap:
         self._center: tuple[int, int] | None = None  # tile the cache is built for
 
     def update_cell(self, tx: int, ty: int) -> None:
-        # a tile changed (e.g. ore mined): drop the cache so the next render
-        # rebuilds the window. simpler than locating the affected pixel.
+        # a tile changed (e.g. ore mined): patch the shared overview and drop the
+        # window cache so the next render re-slices it.
+        ov = getattr(self.world, '_render_overview', None)
+        if ov is not None:
+            ov.update_cell(tx, ty)
         self._surf = None
 
     def rebuild(self) -> None:
+        ov = getattr(self.world, '_render_overview', None)
+        if ov is not None:
+            ov.rebuild()
         self._surf = None
 
     def _build(self, ctx: int, cty: int) -> pg.Surface:
-        # VIEW_TILES square, 1px/tile, centered on (ctx, cty); out-of-bounds
-        # tiles render as VOID so the map edge is visible.
+        # VIEW_TILES square, 1px/tile, centered on (ctx, cty); a numpy slice of
+        # the shared overview, VOID-padded where the window runs off the map.
         n = self.VIEW_TILES
         half = n // 2
         w, h = self.world.width, self.world.height
-        surf = pg.Surface((n, n))
-        for j in range(n):
-            ty = cty - half + j
-            in_row = 0 <= ty < h
-            for i in range(n):
-                tx = ctx - half + i
-                if in_row and 0 <= tx < w:
-                    surf.set_at((i, j), _block_color(self.world, tx, ty, 1))
-                else:
-                    surf.set_at((i, j), self.VOID)
-        return surf
+        win = np.empty((n, n, 3), dtype=np.uint8)
+        win[...] = self.VOID
+        y0, x0 = cty - half, ctx - half
+        sy0, sx0 = max(0, y0), max(0, x0)
+        sy1, sx1 = min(h, y0 + n), min(w, x0 + n)
+        if sy1 > sy0 and sx1 > sx0:
+            src = get_overview(self.world).rgb[sy0:sy1, sx0:sx1]
+            win[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = src
+        return _surface_from_rgb(win)
 
     def render(self, target: pg.Surface, screen_size: tuple[int, int],
                camera_offset: pg.math.Vector2,
@@ -399,7 +448,7 @@ class MapView:
         self.open = False
         self._surface: pg.Surface | None = None
         self._tpp = 1
-        self._dims: tuple[int, int] | None = None
+        self._version = -1   # overview version this surface was built from
 
     def toggle(self) -> None:
         self.open = not self.open
@@ -408,10 +457,13 @@ class MapView:
         self.open = False
 
     def _ensure_surface(self) -> None:
-        dims = (self.world.width, self.world.height)
-        if self._surface is None or self._dims != dims:
-            self._surface, self._tpp = build_world_surface(self.world, self.MAX_PX)
-            self._dims = dims
+        # rebuild only when the shared overview changed (map edits / resize),
+        # by downsampling it — cheap enough to not need a dims check.
+        ov = get_overview(self.world)
+        if self._surface is None or self._version != ov.version:
+            self._tpp = max(1, math.ceil(max(self.world.width, self.world.height) / self.MAX_PX))
+            self._surface = _surface_from_rgb(_downsample_rgb(ov.rgb, self._tpp))
+            self._version = ov.version
 
     def render(self, target: pg.Surface, screen_size: tuple[int, int],
                camera) -> None:
