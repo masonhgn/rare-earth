@@ -42,10 +42,11 @@ from prototype import load_prototype
 
 SCHEMA_VERSION = 7
 
-# saves live next to the project root, not inside src/. resolves relative
-# to this file so the path is stable regardless of cwd.
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SAVE_DIR = os.path.join(_PROJECT_ROOT, 'saves')
+# saves live in the writable base: the project root when run from source
+# (unchanged), or next to the executable in a frozen build (never inside the
+# bundle, which is read-only / wiped on exit for onefile).
+import respath
+SAVE_DIR = os.path.join(respath.writable_base(), 'saves')
 SAVE_PATH = os.path.join(SAVE_DIR, 'save.json')
 # named single-player worlds each get their own file here, so the world-select
 # screen can list / load / delete them independently of the legacy SAVE_PATH.

@@ -6,6 +6,9 @@
 
 import pygame as pg
 
+import respath
+respath.init()   # frozen exe: chdir into the bundled assets before anything loads
+
 from config import SCREEN_WIDTH, SCREEN_HEIGHT
 from titlescreen import show_title
 from worldselect import show_world_select

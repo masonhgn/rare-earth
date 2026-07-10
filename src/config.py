@@ -1,4 +1,7 @@
 
+import os as _os
+import respath as _respath
+
 # project paths
 DATA_DIR = 'src/data'
 ENTITIES_DIR = f'{DATA_DIR}/entities'
@@ -16,8 +19,11 @@ ANIMATIONS_FILE = f'{DATA_DIR}/animations.json'
 # inventory ui asset
 INVENTORY_UI_FILE = f'{DATA_DIR}/sprites/ui/inventory.png'
 
-# runtime settings json (persisted across launches)
-SETTINGS_FILE = f'{DATA_DIR}/settings.json'
+# runtime settings json (persisted across launches). from source this stays in
+# src/data; in a frozen build it must go to a writable spot next to the exe,
+# since the bundled data tree is read-only / ephemeral.
+SETTINGS_FILE = (_os.path.join(_respath.writable_base(), 'settings.json')
+                 if _respath.FROZEN else f'{DATA_DIR}/settings.json')
 
 # convention dirs / files for auto-loaded, data-driven content
 TILES_DIR = f'{DATA_DIR}/sprites/tiles'          # auto-scanned terrain/ore tiles

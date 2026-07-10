@@ -31,6 +31,8 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...but our hand-maintained build spec IS source — keep it tracked.
+!rare-earth.spec
 
 # Installer logs
 pip-log.txt

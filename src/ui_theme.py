@@ -13,7 +13,13 @@ import os
 
 import pygame as pg
 
-_FONT_DIR = os.path.join(os.path.dirname(__file__), 'data', 'fonts')
+from config import DATA_DIR
+
+# cwd-relative like every other asset (config.DATA_DIR == 'src/data'), so the
+# font resolves the same way under a frozen build as the rest of the data tree.
+# resolving via __file__ instead breaks in a PyInstaller bundle, where the
+# module and the data land in different roots.
+_FONT_DIR = os.path.join(DATA_DIR, 'fonts')
 
 
 def get_font(size: int) -> pg.font.Font:
