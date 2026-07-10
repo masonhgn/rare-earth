@@ -116,17 +116,23 @@ class GameServer:
         # give the new player their own contract board (per-player ownership).
         ensure_board(self.sim.world.entities[pid].exchange_state, self.sim.spot_market)
         conn = Connection(writer, pid)
-        self.conns[id(writer)] = conn
         peer = writer.get_extra_info('peername')
-        print(f'[server] {peer} joined as {pid} ({len(self.conns)} online)')
-
-        writer.write(netproto.encode({
-            'type': 'welcome',
-            'player_id': pid,
-            'world': netproto.world_join(self.sim.world, self.sim.spot_market, self.sim.day_clock),
-        }))
         try:
+            # send the join snapshot and flush it BEFORE joining the broadcast
+            # set. the welcome is the whole map — megabytes on a big world — and
+            # takes many ticks to reach a remote client over a real link. if the
+            # connection were already in self.conns, the tick loop's per-client
+            # write-buffer guard (_send_to) would see the still-draining welcome
+            # exceed MAX_WRITE_BUFFER and drop the player mid-join. only after the
+            # welcome has flushed do we start streaming per-tick snapshots.
+            writer.write(netproto.encode({
+                'type': 'welcome',
+                'player_id': pid,
+                'world': netproto.world_join(self.sim.world, self.sim.spot_market, self.sim.day_clock),
+            }))
             await writer.drain()
+            self.conns[id(writer)] = conn
+            print(f'[server] {peer} joined as {pid} ({len(self.conns)} online)')
             while True:
                 msg = await netproto.read_msg(reader)
                 if msg is None:
@@ -177,7 +183,7 @@ class GameServer:
                 elif mtype == 'close_machine':
                     conn.open_machine = None
         finally:
-            self.conns.pop(id(writer), None)
+            was_registered = self.conns.pop(id(writer), None) is not None
             p = self.sim.world.entities.get(pid)
             if p is not None:
                 self._drop_player_goods(p, include_dropbox=True)   # spill goods + drop box so a disconnect doesn't sink them
@@ -186,7 +192,10 @@ class GameServer:
                 writer.close()
             except Exception:
                 pass
-            print(f'[server] {pid} left ({len(self.conns)} online)')
+            # only a client that actually joined (welcome flushed, added to
+            # self.conns) logs a "left"; one that dropped mid-welcome never did.
+            if was_registered:
+                print(f'[server] {pid} left ({len(self.conns)} online)')
 
     # --- authoritative tick ---
 
