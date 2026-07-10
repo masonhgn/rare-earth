@@ -281,6 +281,30 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
     local_id = welcome['player_id']
     print(f'[client] connected as {local_id}')
 
+    # start draining the socket NOW, before the heavy join setup below (world
+    # build + full-map pre-render can take seconds on a big world). the server
+    # streams snapshots at the tick rate the instant we connect and drops any
+    # client whose unread send buffer backs up past MAX_WRITE_BUFFER — so if we
+    # don't read until after setup, a large world gets us kicked mid-join.
+    # queued frames just pile up in `incoming` (cheap) until the loop drains them.
+    incoming: queue.Queue = queue.Queue()
+    net_alive = {'ok': True}
+
+    def net_loop():
+        # any exit — clean EOF, reset, or a malformed frame — flags the main
+        # loop so the client doesn't render stale state forever.
+        try:
+            while True:
+                msg = netproto.recv(sock)
+                if msg is None:
+                    break
+                incoming.put(msg)
+        except Exception:
+            pass
+        net_alive['ok'] = False
+
+    threading.Thread(target=net_loop, daemon=True).start()
+
     pg.init()
     pg.display.set_caption(f'{TITLE} (client {local_id})')
     settings = load_settings()
@@ -357,24 +381,6 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         ('inventory', 'src/data/sprites/ui/tabs/backpack.png', inventory.toggle),
         ('settings', 'src/data/sprites/ui/tabs/settings.png', _toggle_settings),
     ])
-
-    incoming: queue.Queue = queue.Queue()
-    net_alive = {'ok': True}
-
-    def net_loop():
-        # any exit — clean EOF, reset, or a malformed frame — flags the main
-        # loop so the client doesn't render stale state forever.
-        try:
-            while True:
-                msg = netproto.recv(sock)
-                if msg is None:
-                    break
-                incoming.put(msg)
-        except Exception:
-            pass
-        net_alive['ok'] = False
-
-    threading.Thread(target=net_loop, daemon=True).start()
 
     clock = pg.time.Clock()
     last_dir = None
