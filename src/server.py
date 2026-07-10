@@ -131,6 +131,12 @@ class GameServer:
                 'world': netproto.world_join(self.sim.world, self.sim.spot_market, self.sim.day_clock),
             }))
             await writer.drain()
+            # stream the map as chunks, draining between each, still BEFORE
+            # joining the broadcast set — so no single frame nears MAX_MSG_BYTES
+            # and the tick loop's buffer guard can't fire on the in-flight map.
+            for frame in netproto.map_chunks(self.sim.world):
+                writer.write(frame)
+                await writer.drain()
             self.conns[id(writer)] = conn
             print(f'[server] {peer} joined as {pid} ({len(self.conns)} online)')
             while True:

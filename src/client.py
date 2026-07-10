@@ -24,7 +24,7 @@ import pygame as pg
 
 from config import TITLE, TILE_LENGTH, ITEM_ICON_SIZE
 from world import World, world_to_tile, in_reach
-from render import Screen, Minimap, WorldRenderer, MapView
+from render import Screen, Minimap, WorldRenderer, MapView, get_overview
 from breaking import BreakSystem, BreakState
 from entity import Entity
 from prototype import load_prototype
@@ -34,7 +34,6 @@ from factory import FactoryPanel
 from spot_market import SpotMarket, HISTORY_LEN
 from clock import DayClock
 from item import DroppedItem
-from save_state import _rle_decode
 from settings import load_settings
 from display import DisplayService
 from settings_panel import SettingsPanel
@@ -140,10 +139,27 @@ def _apply_overlay(world, minimap, changes) -> None:
             minimap.update_cell(tx, ty)
 
 
-def _build_world(world, wd, local_id) -> None:
+def _recv_map(sock, wd):
+    # reassemble the full map from the streamed 'chunk' frames that follow the
+    # welcome. blocks until all n_chunks arrive; raises on disconnect. grids are
+    # pre-filled so a dropped frame would leave a visible hole rather than crash.
     w, h = wd['width'], wd['height']
-    world.load_grids(w, h, _rle_decode(wd['map_grid'], w, h),
-                     _rle_decode(wd['overlay_grid'], w, h))
+    map_grid = [['grass'] * w for _ in range(h)]
+    overlay_grid = [[None] * w for _ in range(h)]
+    remaining = wd['n_chunks']
+    while remaining > 0:
+        msg = netproto.recv(sock)
+        if msg is None:
+            raise ConnectionError('server closed during map transfer')
+        if msg.get('type') != 'chunk':
+            continue
+        netproto.apply_chunk(map_grid, overlay_grid, msg)
+        remaining -= 1
+    return map_grid, overlay_grid
+
+
+def _build_world(world, wd, local_id, map_grid, overlay_grid) -> None:
+    world.load_grids(wd['width'], wd['height'], map_grid, overlay_grid)
     _apply_entities(world, wd['ents'], local_id)
     _apply_dropped(world, wd['dropped'])
 
@@ -279,14 +295,22 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         print('[client] no welcome from server')
         return
     local_id = welcome['player_id']
+    wd = welcome['world']
     print(f'[client] connected as {local_id}')
 
-    # start draining the socket NOW, before the heavy join setup below (world
-    # build + full-map pre-render can take seconds on a big world). the server
-    # streams snapshots at the tick rate the instant we connect and drops any
-    # client whose unread send buffer backs up past MAX_WRITE_BUFFER — so if we
-    # don't read until after setup, a large world gets us kicked mid-join.
-    # queued frames just pile up in `incoming` (cheap) until the loop drains them.
+    # receive the map, streamed as chunk frames right after the welcome. read
+    # them synchronously here — BEFORE the background reader thread starts — so
+    # the chunk frames aren't stolen into the snapshot queue.
+    try:
+        map_grid, overlay_grid = _recv_map(sock, wd)
+    except (ConnectionError, OSError):
+        print('[client] lost the server during the map transfer')
+        return
+
+    # from here the server streams per-tick snapshots. drain them in the
+    # background so the heavy join setup below (world build + overview) can't
+    # back the server's send buffer up past MAX_WRITE_BUFFER; queued frames just
+    # pile up in `incoming` (cheap) until the main loop drains them.
     incoming: queue.Queue = queue.Queue()
     net_alive = {'ok': True}
 
@@ -311,7 +335,10 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
     screen = Screen(settings['screen_width'], settings['screen_height'],
                     display_mode=settings['display_mode'])
     world = World()
-    _build_world(world, welcome['world'], local_id)
+    _build_world(world, wd, local_id, map_grid, overlay_grid)
+    # build the render overview now (during the blocking join) so the first
+    # frame doesn't stall on it; the minimap/map then just slice this array.
+    get_overview(world)
     # local read-only day clock: elapsed is overwritten from the server each
     # snapshot (never ticked here, so no client-side rollover side effects).
     day_clock = DayClock()

@@ -27,6 +27,7 @@ import time
 import world as world_mod
 import save_state
 import server as server_mod
+import netproto
 
 
 def _make_server(dim):
@@ -90,15 +91,29 @@ class _NetServer:
             await asyncio.gather(srv.serve_forever(), self.gs._tick_loop())
 
 
+def _recv_join(s):
+    # welcome + the streamed map chunks; returns (welcome, reassembled grids).
+    welcome = _recv_msg(s)
+    assert welcome is not None and welcome['type'] == 'welcome'
+    wd = welcome['world']
+    w, h = wd['width'], wd['height']
+    map_grid = [['grass'] * w for _ in range(h)]
+    overlay_grid = [[None] * w for _ in range(h)]
+    for _ in range(wd['n_chunks']):
+        chunk = _recv_msg(s)
+        assert chunk is not None and chunk['type'] == 'chunk', 'map transfer interrupted'
+        netproto.apply_chunk(map_grid, overlay_grid, chunk)
+    return welcome, map_grid, overlay_grid
+
+
 def test_client_joins_and_receives_snapshots():
     srv = _NetServer(dim=60)
     s = socket.create_connection(('127.0.0.1', srv.port), timeout=15)
     s.settimeout(15)
     try:
-        welcome = _recv_msg(s)
-        assert welcome is not None and welcome['type'] == 'welcome'
+        welcome, _, _ = _recv_join(s)
         assert 'player_id' in welcome
-        assert set(welcome['world']) >= {'width', 'height', 'map_grid', 'ents'}
+        assert set(welcome['world']) >= {'width', 'height', 'chunk_size', 'n_chunks', 'ents'}
 
         snapshots = 0
         for _ in range(80):
@@ -111,6 +126,29 @@ def test_client_joins_and_receives_snapshots():
         assert snapshots >= 5, f'only received {snapshots} snapshots'
     finally:
         s.close()
+
+
+def test_streamed_chunks_reassemble_to_the_server_map():
+    # every chunk frame must be well under the message cap, and reassembling
+    # them must reproduce the server's actual grids exactly.
+    srv = _NetServer(dim=200)   # 200/64 -> a 4x4 chunk grid with ragged edges
+    s = socket.create_connection(('127.0.0.1', srv.port), timeout=15)
+    s.settimeout(15)
+    try:
+        welcome, map_grid, overlay_grid = _recv_join(s)
+        assert welcome['world']['n_chunks'] == 4 * 4
+        assert map_grid == srv.gs.sim.world.map_grid
+        assert overlay_grid == srv.gs.sim.world.overlay_grid
+    finally:
+        s.close()
+
+
+def test_chunk_frames_stay_under_the_message_cap():
+    import netproto as _np
+    srv = _NetServer(dim=200)
+    frames = list(_np.map_chunks(srv.gs.sim.world))
+    assert frames, 'no chunks produced'
+    assert max(len(f) for f in frames) < _np.MAX_MSG_BYTES
 
 
 # --- 2) deterministic invariant regression guard -------------------------
