@@ -3,8 +3,8 @@
     "tile_locked": true,
     "editable": false,
     "solid": true,
-    "footprint_size": [12, 8],
-    "sprite_size": [768, 512],
+    "footprint_size": [2, 2],
+    "sprite_size": [128, 128],
     "interactable": "factory",
     "machine": {
         "input_slots": 20,

@@ -58,7 +58,7 @@
         },
         "factory": {
             "file": "src/data/sprites/tiles/factory.png",
-            "size": [768, 512]
+            "size": [128, 128]
         },
         "exchange": {
             "file": "src/data/sprites/tiles/exchange.png",

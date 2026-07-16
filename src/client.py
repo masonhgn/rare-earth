@@ -481,6 +481,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
             elif event.type == pg.MOUSEWHEEL:
                 if exchange_panel.open:
                     exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
+                elif player_panel.open:
+                    player_panel.handle_scroll(pg.mouse.get_pos(), event.y)
                 else:
                     screen.zoom_by(event.y)
             elif event.type == pg.MOUSEBUTTONDOWN and event.button == 1:

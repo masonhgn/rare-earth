@@ -143,6 +143,8 @@ def event_loop(game) -> None:
             # otherwise it zooms the world view in/out.
             if game.exchange_panel.open:
                 game.exchange_panel.handle_scroll(pg.mouse.get_pos(), event.y)
+            elif game.player_panel.open:
+                game.player_panel.handle_scroll(pg.mouse.get_pos(), event.y)
             else:
                 game.screen.zoom_by(event.y)
 
