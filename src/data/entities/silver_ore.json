@@ -3,6 +3,8 @@
     "tile_locked": true,
     "editable": true,
     "break_time": 0.7,
+    "mining_level": 15,
+    "mining_xp": 32,
     "drops": [
         {"item": "silver_ore", "quantity": [1, 2]}
     ]

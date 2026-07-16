@@ -38,9 +38,11 @@ from config import DAY_LENGTH_SEC
 from entity import Entity
 from item import DroppedItem
 from prototype import load_prototype
+import skills
+import player_ops
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # saves live in the writable base: the project root when run from source
 # (unchanged), or next to the executable in a frozen build (never inside the
@@ -177,6 +179,8 @@ def save_game(g, path: str | None = None) -> None:
             'world_y': player.world_y,
             # per-player forward-contract state (board/active/drop_box).
             'exchange': player.exchange_state,
+            # progression xp per track (combat/health/mining/farming).
+            'skills': player.skills,
         },
         'inventory_slots': g.inventory.slots,
         'world': _serialize_world(w, pg.time.get_ticks()),
@@ -327,6 +331,21 @@ def load_game(g, path: str = SAVE_PATH) -> bool:
     saved_exchange = data['player'].get('exchange')
     if saved_exchange is not None:
         g.world.get_player().components['player']['exchange'] = saved_exchange
+
+    # restore skill xp onto the prototype-fresh 'skills' component. merge by
+    # known track so a save that predates a track (or carries a removed one)
+    # still loads — the component is the source of truth for which tracks exist.
+    saved_skills = data['player'].get('skills')
+    if saved_skills:
+        player_skills = g.world.get_player().skills
+        for track in player_skills:
+            if track in saved_skills:
+                player_skills[track] = saved_skills[track]
+    # max hp derives from the Health level, so recompute it after restoring
+    # skills; health resets to full on load (it isn't serialized).
+    loaded_player = g.world.get_player()
+    player_ops.apply_health_level(loaded_player)
+    loaded_player.health = loaded_player.max_health
 
     _restore_market_state(g, data)
     return True
@@ -618,6 +637,17 @@ def _migrate_v6_to_v7(data: dict) -> dict:
     return data
 
 
+def _migrate_v7_to_v8(data: dict) -> dict:
+    # v8 adds the player's skills progression (combat/health/mining/farming).
+    # existing single-player characters start fresh at level 1. server saves
+    # carry no 'player' block, so they just bump the version.
+    player = data.get('player')
+    if player is not None and 'skills' not in player:
+        player['skills'] = skills.fresh_skills()
+    data['version'] = 8
+    return data
+
+
 MIGRATIONS = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
@@ -625,4 +655,5 @@ MIGRATIONS = {
     4: _migrate_v4_to_v5,
     5: _migrate_v5_to_v6,
     6: _migrate_v6_to_v7,
+    7: _migrate_v7_to_v8,
 }

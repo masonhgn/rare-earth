@@ -99,10 +99,14 @@ class HudOverlay:
 
     def _draw_player_health(self) -> None:
         # the player's own health, bottom-center, with the numeric value.
+        # rattle the bar briefly after a hit (last_damage_ms is set in combat).
         game = self.game
+        player = game.world.get_player()
+        shake = hud_render.health_bar_shake(
+            player.last_damage_ms if player else None, pg.time.get_ticks())
         hud_render.draw_health_bar(
-            game.screen.surface, game.world.get_player(),
-            show_number=True, font=game.hud.font)
+            game.screen.surface, player,
+            show_number=True, font=game.hud.font, shake=shake)
 
     def _hovered_item_proto(self):
         # find the item under the cursor across inventory, factory panel, and

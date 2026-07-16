@@ -158,7 +158,7 @@ def _on_keydown(game, event) -> None:
     mods = pg.key.get_mods()
 
     if key == pg.K_b:
-        game.inventory.toggle()
+        game.toggle_inventory()
     elif key == pg.K_g:
         # toggle build mode: left-click then places the held item as a
         # tile-locked entity, with a green/red highlight on the hovered tile.
@@ -174,6 +174,8 @@ def _on_keydown(game, event) -> None:
         # bring up the settings modal (manual save + display mode).
         if game.map_view.open:
             game.map_view.close()
+        elif game.player_panel.open:
+            game.player_panel.close()
         elif game.settings_panel.open:
             game.settings_panel.close()
         elif game.exchange_panel.open:
@@ -181,7 +183,7 @@ def _on_keydown(game, event) -> None:
         elif game.factory_panel.open:
             game.close_factory_panel()
         else:
-            game.settings_panel.open_panel((game.screen.width, game.screen.height))
+            game.open_settings()
     elif key == pg.K_q and (mods & pg.KMOD_CTRL):
         game.running = False
 
@@ -217,6 +219,11 @@ def _on_left_click(game, event) -> None:
             _route_modal_click(game, modal, (mx, my))
             return
         on_outside()
+
+    # character sheet shares the inventory's bottom-left slot; a click on it is
+    # display-only, so swallow it rather than walking/breaking the world behind.
+    if game.player_panel.hit((mx, my)):
+        return
 
     if game.inventory.open:
         slot = game.inventory.slot_at_pixel((mx, my))

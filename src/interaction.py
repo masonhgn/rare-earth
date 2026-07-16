@@ -14,6 +14,7 @@
 from item import load_item
 from prototype import load_prototype
 from world import in_reach
+import skills
 
 
 def breakable_at(world, tile):
@@ -33,6 +34,17 @@ def breakable_at(world, tile):
     except FileNotFoundError:
         return None
     return (proto, None) if proto.editable else None
+
+
+def can_mine(player, proto) -> bool:
+    # Mining-level gate: True unless breaking `proto` needs a higher Mining level
+    # than `player` has. shared by SP (BreakSystem), the client's break preflight,
+    # and the authoritative server so all three agree on what's mineable.
+    req = getattr(proto, 'mining_level', 1) or 1
+    if req <= 1:
+        return True
+    return (player is not None and player.skills is not None
+            and skills.level_of(player.skills, 'mining') >= req)
 
 
 def mob_at(world, wx: float, wy: float, exclude_id=None):
@@ -92,4 +104,9 @@ def can_place(world, player, tile, held) -> bool:
     placed = load_prototype(item.places)
     if placed.plant_on is not None and world.base_at(tx, ty) != placed.plant_on:
         return False
+    # Farming-level gate: crops with farming_level > 1 need the skill to plant.
+    # non-crop placeables default to 1 (no gate). shows as a red build highlight.
+    if placed.farming_level > 1:
+        if player.skills is None or skills.level_of(player.skills, 'farming') < placed.farming_level:
+            return False
     return True

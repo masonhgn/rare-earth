@@ -3,6 +3,8 @@
     "tile_locked": true,
     "editable": true,
     "break_time": 0.45,
+    "mining_level": 1,
+    "mining_xp": 12,
     "drops": [
         {"item": "copper_ore", "quantity": [1, 3]}
     ]

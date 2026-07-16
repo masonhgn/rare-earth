@@ -3,6 +3,8 @@
     "tile_locked": true,
     "editable": true,
     "break_time": 1.0,
+    "mining_level": 25,
+    "mining_xp": 55,
     "drops": [
         {"item": "haldrite_ore", "quantity": [1, 2]}
     ]

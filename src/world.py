@@ -76,6 +76,11 @@ class World:
         # spatial grid for dropped items, cell size = TILE_LENGTH
         self.spatial_grid: dict[tuple[int, int], list[DroppedItem]] = {}
 
+        # transient queue of skill level-ups (skill, level) awaiting a toast.
+        # any system that grants xp (combat/breaking/crop, via player_ops.grant_xp)
+        # appends here; the HUD drains it each frame. server ignores it.
+        self.pending_level_ups: list[tuple[str, int]] = []
+
         self.spawn_player()
 
     # --- map ---
@@ -348,14 +353,15 @@ class World:
 
     # --- break helper: removes an entity, returns its drops ---
 
-    def break_entity(self, entity_id: str) -> list[tuple[str, int]]:
+    def break_entity(self, entity_id: str, farming_level: int = 1) -> list[tuple[str, int]]:
         entity = self.entities.get(entity_id)
         if entity is None or not entity.prototype.editable:
             return []
         crop = entity.components.get('crop')
         if crop is not None:
-            # crops harvest stage-gated: mature -> grain + seed, else seed back.
-            drops = crop_ops.harvest_drops(entity.prototype.crop, crop['stage'])
+            # crops harvest stage-gated: mature -> grain (+Farming yield bonus)
+            # and a seed, else just the seed back.
+            drops = crop_ops.harvest_drops(entity.prototype.crop, crop['stage'], farming_level)
         else:
             drops = roll_drops(entity.prototype.drops)
         self.remove_entity(entity_id)

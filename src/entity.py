@@ -7,6 +7,7 @@ import pygame as pg
 from config import TILE_LENGTH, EXCHANGE_DROP_BOX_SLOTS
 from animation import AnimationState
 from inventory_data import PlayerInventory
+import skills
 
 
 class Entity:
@@ -89,6 +90,11 @@ class Entity:
                     'drop_box': [None] * EXCHANGE_DROP_BOX_SLOTS,
                 },
             }
+            # progression xp per track (combat/health/mining/farming). the raw
+            # dict lives here; skills.py derives level + stat effects from it.
+            # persisted in the save's player block (see save_state), not via the
+            # generic entity codec — the player entity isn't world-serialized.
+            self.components['skills'] = skills.fresh_skills()
 
     @property
     def machine_state(self) -> dict | None:
@@ -105,6 +111,11 @@ class Entity:
     def is_player(self) -> bool:
         # role check that replaces the old hardcoded `id == 'player'` tests.
         return 'player' in self.components
+
+    @property
+    def skills(self) -> dict | None:
+        # the player's {track: xp} progression dict, or None for non-players.
+        return self.components.get('skills')
 
     @property
     def inventory(self):

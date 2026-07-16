@@ -14,6 +14,9 @@
 # cycle, and CropSystem takes the world as a constructor arg.
 
 
+import skills
+
+
 def _pair(spec):
     # a {"item", "quantity"} sub-spec -> (item_id, quantity), or None if absent.
     if not spec:
@@ -25,14 +28,16 @@ def is_mature(crop_spec: dict, stage: int) -> bool:
     return stage >= len(crop_spec['stages']) - 1
 
 
-def harvest_drops(crop_spec: dict, stage: int) -> list[tuple[str, int]]:
+def harvest_drops(crop_spec: dict, stage: int, farming_level: int = 1) -> list[tuple[str, int]]:
     # what a crop drops when broken at `stage`. mature (final stage) -> the
-    # harvest yield plus a seed; immature -> just the seed returned.
+    # harvest yield (plus a Farming-level yield bonus) and a seed; immature ->
+    # just the seed returned.
     drops = []
     if is_mature(crop_spec, stage):
         harvest = _pair(crop_spec.get('harvest'))
         if harvest is not None:
-            drops.append(harvest)
+            item_id, qty = harvest
+            drops.append((item_id, qty + skills.yield_bonus(farming_level)))
     seed = _pair(crop_spec.get('seed'))
     if seed is not None:
         drops.append(seed)

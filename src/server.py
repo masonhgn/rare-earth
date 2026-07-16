@@ -33,6 +33,8 @@ import movement
 import netproto
 import slots as slot_ops
 import player_ops
+import skills
+import crop as crop_ops
 
 TICK_HZ = 20
 PLAYER_ATTACK_CD = 0.4      # seconds between a player's melee swings
@@ -236,7 +238,7 @@ class GameServer:
             (pcx, pcy), (tcx, tcy) = p.center, target.center
             if (pcx - tcx) ** 2 + (pcy - tcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2:
                 movement.knock_back(p, target)
-                self.sim.combat.hit(target, pg.time.get_ticks())
+                self.sim.combat.hit(p, target, pg.time.get_ticks())
                 conn.attack_cd = PLAYER_ATTACK_CD
 
     def _process_breaks(self) -> None:
@@ -254,23 +256,36 @@ class GameServer:
             tx, ty = tile
             if not in_reach(p, tx, ty):
                 continue   # out of reach
-            self._break_tile(tx, ty)
+            self._break_tile(tx, ty, p)
 
-    def _break_tile(self, tx: int, ty: int) -> None:
+    def _break_tile(self, tx: int, ty: int, p) -> None:
+        # `p` is the acting player: enforces the Mining-level gate and earns them
+        # the mining/farming xp for what they break (mirrors BreakSystem in SP).
         w = self.sim.world
         found = interaction.breakable_at(w, (tx, ty))
         if found is None:
             return
         proto, entity_id = found
+        if not interaction.can_mine(p, proto):
+            return   # gated: needs a higher Mining level
         if entity_id is not None:
-            for item_id, qty in w.break_entity(entity_id):
+            ent = w.entities.get(entity_id)
+            crop = ent.components.get('crop') if ent is not None else None
+            farming_level = (skills.level_of(p.skills, 'farming')
+                             if p is not None and p.skills is not None else 1)
+            for item_id, qty in w.break_entity(entity_id, farming_level=farming_level):
                 w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
+            player_ops.grant_xp(w, p, 'mining', getattr(proto, 'mining_xp', 0.0) or 0.0)
+            if crop is not None and proto.crop is not None \
+                    and crop_ops.is_mature(proto.crop, crop['stage']):
+                player_ops.grant_xp(w, p, 'farming', getattr(proto, 'farming_xp', 0.0) or 0.0)
             return
         # overlay ore: clear the tile, record the delta for the snapshot, drop.
         w.overlay_grid[ty][tx] = None
         self._overlay_changes.append((tx, ty))
         for item_id, qty in roll_drops(proto.drops):
             w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
+        player_ops.grant_xp(w, p, 'mining', getattr(proto, 'mining_xp', 0.0) or 0.0)
 
     def _process_places(self) -> None:
         # build-mode placement: validate reach + emptiness + that the acting
@@ -492,6 +507,9 @@ class GameServer:
                 w.write(netproto.encode({'type': 'inv', 'slots': p.inventory.slots, 'held': p.held_item}))
                 # per-player forward-contract state (board / active / drop box)
                 w.write(netproto.encode({'type': 'exchange', 'state': p.exchange_state}))
+                # per-player skill xp (drives the character sheet + level-up toasts;
+                # max hp from the Health level rides the shared snapshot's 'mhp')
+                w.write(netproto.encode({'type': 'skills', 'skills': p.skills}))
             if conn.open_machine is not None:
                 mm = self._machine_msg(conn.open_machine)
                 if mm is not None:

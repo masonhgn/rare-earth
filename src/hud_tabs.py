@@ -1,22 +1,27 @@
 
-# right-side tab strip. each tab is a small icon tile that toggles a
+# top-right tab strip. each tab is a small icon tile that toggles a
 # piece of ui:
+#   - player    -> character/stats sheet
 #   - backpack  -> shows/hides the inventory grid
 #   - settings  -> opens/closes the settings modal
 #
-# tabs are stacked vertically and vertically centered on the right edge
-# of the screen. extra tabs can be appended by registering more
-# (id, image_path, on_click) entries — the strip resizes automatically.
+# tabs sit in a horizontal row tucked under the minimap, right-aligned to its
+# edge. extra tabs can be appended by registering more (id, image_path,
+# on_click) entries — the row grows leftward automatically.
 
 import pygame as pg
 
 from resources import load_image
 
 
-TAB_SIZE = 56
-TAB_GAP = 10
-# pixel offset between the right edge of the screen and the tab column.
-RIGHT_EDGE_MARGIN = 16
+TAB_SIZE = 36
+TAB_GAP = 6
+# anchor under the top-right minimap. mirrors Minimap.BOX_PX (200) + its
+# padding (12) + 2px backdrop, right-aligned with the minimap's right edge.
+_MINIMAP_RIGHT_PAD = 12
+_MINIMAP_BOTTOM = _MINIMAP_RIGHT_PAD + 200 + 2
+TOP_MARGIN = _MINIMAP_BOTTOM + 8
+RIGHT_EDGE_MARGIN = _MINIMAP_RIGHT_PAD
 
 
 class HudTab:
@@ -35,17 +40,16 @@ class HudTabs:
         self.tabs = [HudTab(t_id, path, cb) for (t_id, path, cb) in tabs]
 
     def _layout(self) -> None:
-        # vertical column on the right edge, centered top-to-bottom so
-        # a resize keeps them visually balanced.
+        # horizontal row under the minimap, right-aligned to its edge; the row
+        # grows leftward as tabs are added so the last one stays at the corner.
         screen_w = self._screen.width
-        screen_h = self._screen.height
         n = len(self.tabs)
-        total_h = n * TAB_SIZE + max(0, n - 1) * TAB_GAP
-        x = screen_w - TAB_SIZE - RIGHT_EDGE_MARGIN
-        y = (screen_h - total_h) // 2
+        total_w = n * TAB_SIZE + max(0, n - 1) * TAB_GAP
+        x = screen_w - RIGHT_EDGE_MARGIN - total_w
+        y = TOP_MARGIN
         for tab in self.tabs:
             tab.rect = pg.Rect(x, y, TAB_SIZE, TAB_SIZE)
-            y += TAB_SIZE + TAB_GAP
+            x += TAB_SIZE + TAB_GAP
 
     def render(self, surface: pg.Surface) -> None:
         self._layout()

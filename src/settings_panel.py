@@ -21,7 +21,9 @@ from ui_theme import (
 )
 
 
-PANEL_W, PANEL_H = 760, 420
+# tall enough that the single-player button stack (Save + Quit + Back to Title)
+# clears the frame's bottom rail instead of running off the pane.
+PANEL_W, PANEL_H = 760, 480
 
 # layout matches ui_theme so a tweak there propagates to every modal.
 INNER_MARGIN = MODAL_INNER_MARGIN

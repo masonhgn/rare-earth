@@ -8,9 +8,11 @@ from config import TILE_LENGTH
 
 
 # knockback imparted to a target when a hit lands; decays in apply_knockback.
-# total travel ~= KNOCKBACK_SPEED / KNOCKBACK_DECAY, tuned here to ~one tile.
+# total travel ~= KNOCKBACK_SPEED / KNOCKBACK_DECAY = KNOCKBACK_TILES tiles.
+# distance is set by KNOCKBACK_TILES; DECAY controls how snappy the slide is.
+KNOCKBACK_TILES = 2.5                             # total travel, in tiles
 KNOCKBACK_DECAY = 14.0                            # per-second decay (higher = fades faster)
-KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY   # initial px/s; ~1 tile of total travel
+KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY * KNOCKBACK_TILES   # initial px/s
 
 # diagonal movement normalization (1/sqrt(2)) so 45deg movement isn't sqrt(2)
 # faster than cardinal. shared by the SP input poller and the server/client

@@ -8,6 +8,8 @@
 # gating, held-cursor font/anchor — are handled by PARAMETERS; each caller
 # keeps its own sequencing and (for the bars) its own visibility gating.
 
+import random
+
 import pygame as pg
 
 from config import TILE_LENGTH
@@ -15,11 +17,26 @@ from item import get_item_icon, load_item, format_quantity
 from ui_theme import get_font
 from world import world_to_tile
 import interaction
+import skills
 
 
 _OVERHEAD_W, _OVERHEAD_H = 44, 5      # over-head health bar
 _HEALTH_W, _HEALTH_H = 260, 20        # bottom-center player health bar
 _BUILD_BANNER = 'BUILD MODE — click to place, G to exit'
+
+# player health-bar "rattle": px of jitter right after a hit, decaying to 0.
+RATTLE_MS = 350
+RATTLE_PX = 5
+
+
+def health_bar_shake(hit_ms, now_ms) -> float:
+    # px of jitter for the bottom player bar, decaying over RATTLE_MS after the
+    # last hit at hit_ms. callers pass whatever timestamp marks "just took
+    # damage" (SP: player.last_damage_ms; client: a tracked hp-drop time).
+    if hit_ms is None:
+        return 0.0
+    t = (now_ms - hit_ms) / RATTLE_MS
+    return 0.0 if t < 0 or t >= 1 else (1.0 - t) * RATTLE_PX
 
 
 def draw_build_highlight(world_surface, world, cam, player, held, cursor_pos) -> None:
@@ -70,13 +87,19 @@ def draw_held_cursor(surface, held, pos, anchor='topleft', font=None,
         surface.blit(font.render(text, True, qty_color), rect)
 
 
-def draw_health_bar(surface, player, show_number=False, font=None) -> None:
+def draw_health_bar(surface, player, show_number=False, font=None, shake=0.0) -> None:
     # bottom-center player health bar. show_number renders "hp/max" (SP).
+    # shake (px) jitters the whole bar for a moment after a hit — see
+    # health_bar_shake() for the decay the callers feed in.
     if player is None or player.health is None:
         return
     w, h = _HEALTH_W, _HEALTH_H
     x = (surface.get_width() - w) // 2
     y = surface.get_height() - h - 14
+    if shake:
+        s = int(shake)
+        x += random.randint(-s, s)
+        y += random.randint(-s, s)
     frac = max(0.0, player.health / player.max_health)
     pg.draw.rect(surface, (0, 0, 0), (x - 2, y - 2, w + 4, h + 4))
     pg.draw.rect(surface, (150, 40, 40), (x, y, w, h))
@@ -104,6 +127,68 @@ def draw_overhead_bar(surface, cam, ent) -> None:
     pg.draw.rect(surface, (150, 40, 40), (bx, by, _OVERHEAD_W, _OVERHEAD_H))
     if frac > 0:
         pg.draw.rect(surface, (70, 200, 80), (bx, by, int(_OVERHEAD_W * frac), _OVERHEAD_H))
+
+
+# skill level-up toasts: a queued line ("Mining Level 12!") that rises + fades.
+TOAST_MS = 2600
+_TOAST_RISE = 20
+# gated-break message ("Requires Mining level N") lifetime.
+GATE_MSG_MS = 1500
+
+
+class LevelUpToasts:
+    # per-view toast queue. drains world.pending_level_ups (filled by
+    # player_ops.grant_xp) into timed lines and renders them stacked, newest at
+    # the bottom. one instance per HUD (single-player Game + the net client).
+    def __init__(self) -> None:
+        self._items: list[list] = []      # [text, born_ms]
+
+    def pump(self, world, now_ms: int) -> None:
+        pending = getattr(world, 'pending_level_ups', None)
+        if pending:
+            for skill, level in pending:
+                self._items.append([f'{skills.display_name(skill)} Level {level}!', now_ms])
+            pending.clear()
+        self._items = [it for it in self._items if now_ms - it[1] < TOAST_MS]
+
+    def render(self, surface: pg.Surface, now_ms: int) -> None:
+        if not self._items:
+            return
+        font = get_font(26)
+        cx = surface.get_width() // 2
+        base_y = surface.get_height() // 3
+        for i, (text, born) in enumerate(reversed(self._items)):
+            t = (now_ms - born) / TOAST_MS
+            alpha = max(0, int(255 * (1 - t)))
+            label = font.render(text, True, (255, 225, 120))
+            shadow = font.render(text, True, (0, 0, 0))
+            label.set_alpha(alpha)
+            shadow.set_alpha(alpha)
+            rect = label.get_rect(center=(cx, base_y - i * 34 - int(_TOAST_RISE * t)))
+            surface.blit(shadow, rect.move(2, 2))
+            surface.blit(label, rect)
+
+
+def draw_gate_message(surface, break_system, now_ms: int) -> None:
+    # brief centered "Requires Mining level N" when a break was level-gated.
+    # clears itself once the message has faded out.
+    msg = getattr(break_system, 'gate_msg', None)
+    if not msg:
+        return
+    text, born = msg
+    age = now_ms - born
+    if age >= GATE_MSG_MS:
+        break_system.gate_msg = None
+        return
+    alpha = max(0, int(255 * (1 - age / GATE_MSG_MS)))
+    font = get_font(22)
+    label = font.render(text, True, (240, 160, 90))
+    shadow = font.render(text, True, (0, 0, 0))
+    label.set_alpha(alpha)
+    shadow.set_alpha(alpha)
+    rect = label.get_rect(center=(surface.get_width() // 2, surface.get_height() // 2 - 60))
+    surface.blit(shadow, rect.move(1, 1))
+    surface.blit(label, rect)
 
 
 def draw_death_overlay(surface, opaque) -> None:

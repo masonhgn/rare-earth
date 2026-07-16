@@ -4,6 +4,8 @@
     "editable": true,
     "break_time": 0.4,
     "plant_on": "grass",
+    "farming_level": 1,
+    "farming_xp": 15,
     "crop": {
         "stages": ["wheat_1", "wheat_2", "wheat_3", "wheat_4"],
         "harvest": {"item": "wheat", "quantity": 2},

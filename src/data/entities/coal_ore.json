@@ -3,6 +3,8 @@
     "tile_locked": true,
     "editable": true,
     "break_time": 0.35,
+    "mining_level": 1,
+    "mining_xp": 8,
     "drops": [
         {"item": "coal", "quantity": [1, 3]}
     ]

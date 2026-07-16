@@ -37,12 +37,14 @@ from item import DroppedItem
 from settings import load_settings
 from display import DisplayService
 from settings_panel import SettingsPanel
+from player_panel import PlayerPanel
 from hud import Hud
 from hud_tabs import HudTabs
 import hud_render
 import interaction
 import movement
 import netproto
+import skills
 
 PREDICT_CORRECT = 10.0      # per-second rate the local player eases to server truth
 INTERP_RATE = 12.0          # per-second rate remote entities ease to their target
@@ -117,6 +119,7 @@ def _apply_entities(world, ents, local_id) -> None:
         else:
             ent.net_x, ent.net_y = e['x'], e['y']
             ent.health = e['hp']
+            ent.max_health = e['mhp']   # tracks a Health-level max-hp bump mid-session
             if ent.id == local_id and (abs(ent.net_x - ent.world_x) > SNAP_DIST
                                        or abs(ent.net_y - ent.world_y) > SNAP_DIST):
                 ent.world_x, ent.world_y = ent.net_x, ent.net_y   # big desync: snap
@@ -247,6 +250,10 @@ def _begin_break(world, local_id, break_system, sock, tile) -> None:
     if found is None:
         return
     proto, entity_id = found
+    if not interaction.can_mine(p, proto):
+        req = getattr(proto, 'mining_level', 1) or 1
+        break_system.gate_msg = (f'Requires Mining level {req}', pg.time.get_ticks())
+        return
     break_time = proto.break_time or 0.0
     if break_time <= 0:
         try:   # instant material: no timer, just fire the intent
@@ -399,18 +406,42 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         on_title=lambda: ui_state.__setitem__('title', True),
     )
 
+    # the backpack, settings, and character sheet are mutually exclusive —
+    # opening any one closes the other two.
+    def _open_settings():
+        inventory.open = False
+        player_panel.close()
+        settings_panel.open_panel((screen.width, screen.height))
+
     def _toggle_settings():
         if settings_panel.open:
             settings_panel.close()
         else:
-            settings_panel.open_panel((screen.width, screen.height))
+            _open_settings()
+    player_panel = PlayerPanel()
+
+    def _toggle_player():
+        if not player_panel.open:
+            inventory.open = False
+            settings_panel.close()
+        player_panel.toggle()
+
+    def _toggle_inventory():
+        if not inventory.open:
+            player_panel.close()
+            settings_panel.close()
+        inventory.toggle()
     hud_tabs = HudTabs(screen, [
-        ('inventory', 'src/data/sprites/ui/tabs/backpack.png', inventory.toggle),
+        ('player', 'src/data/sprites/ui/tabs/player.png', _toggle_player),
+        ('inventory', 'src/data/sprites/ui/tabs/backpack.png', _toggle_inventory),
         ('settings', 'src/data/sprites/ui/tabs/settings.png', _toggle_settings),
     ])
+    level_toasts = hud_render.LevelUpToasts()
 
     clock = pg.time.Clock()
     last_dir = None
+    prev_hp = None            # local player's hp last frame; detect drops for the
+    hp_rattle_ms = None       # health-bar rattle + hit dust (server owns knockback)
     build_mode = False
     running = True
     while running and net_alive['ok'] and not ui_state['quit'] and not ui_state['title']:
@@ -423,6 +454,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                     # close the top open overlay; if none, open the settings modal.
                     if map_view.open:
                         map_view.close()
+                    elif player_panel.open:
+                        player_panel.close()
                     elif settings_panel.open:
                         settings_panel.close()
                     elif exchange_panel.open:
@@ -434,9 +467,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                         except OSError:
                             running = False
                     else:
-                        settings_panel.open_panel((screen.width, screen.height))
+                        _open_settings()
                 elif event.key == pg.K_b:
-                    inventory.toggle()
+                    _toggle_inventory()
                 elif event.key == pg.K_g:
                     build_mode = not build_mode
                 elif event.key == pg.K_TAB:
@@ -464,6 +497,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                             settings_panel.handle_click(pos)
                         else:
                             settings_panel.close()
+                    elif player_panel.hit(pos):
+                        pass   # character sheet is display-only: swallow the click
                     elif exchange_panel.open and exchange_panel.hit(pos):
                         # spot / forward / drop-box all route through intents now
                         exchange_panel.handle_click(pos, held)
@@ -527,6 +562,19 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                     lp = world.entities.get(local_id)
                     if lp is not None:
                         lp.components['player']['exchange'] = msg['state']
+                elif mtype == 'skills':
+                    lp = world.entities.get(local_id)
+                    if lp is not None and lp.skills is not None:
+                        # apply the authoritative xp, and derive level-up toasts
+                        # from the diff (no separate event channel needed).
+                        for track, xp in msg['skills'].items():
+                            if track not in lp.skills:
+                                continue
+                            before = skills.level_of(lp.skills, track)
+                            lp.skills[track] = xp
+                            after = skills.level_of(lp.skills, track)
+                            for lvl in range(before + 1, after + 1):
+                                world.pending_level_ups.append((track, lvl))
                 elif mtype == 'machine':
                     ent = world.entities.get(msg['id'])
                     if ent is not None and 'machine' in ent.components:
@@ -558,6 +606,8 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         _step_remote(world, local_id, dt)
         # advance the local break timer (progress bar); fires the intent on done
         _update_break(world, local_id, world_renderer.break_system, sock)
+        # advance transient particles (hit dust); rendered by flush() below.
+        world_renderer.break_system.tick(dt)
         # advance the open machine's craft progress locally between server
         # updates so the bar is smooth; each 'machine' message re-syncs it.
         if factory_panel.open and factory_panel.entity is not None:
@@ -591,11 +641,27 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         exchange_panel.render(screen.surface, (screen.width, screen.height))
         factory_panel.render(screen.surface, (screen.width, screen.height))
         settings_panel.render(screen.surface, (screen.width, screen.height))
+        player_panel.render(screen.surface, (screen.width, screen.height), player)
         map_view.render(screen.surface, (screen.width, screen.height), screen.camera)
+        # skill feedback: level-up toasts + a gated-break message. (XP itself is
+        # SP-only for now; on the client these stay quiet until server-auth XP.)
+        _toast_now = pg.time.get_ticks()
+        level_toasts.pump(world, _toast_now)
+        level_toasts.render(screen.surface, _toast_now)
+        hud_render.draw_gate_message(screen.surface, world_renderer.break_system, _toast_now)
         if player is not None:
             hud_render.draw_held_cursor(screen.surface, player.held_item, pg.mouse.get_pos(),
                                         anchor='center', icon_size=ITEM_ICON_SIZE, shadow=True)
-        hud_render.draw_health_bar(screen.surface, player)
+        # detect an hp drop this frame (server integrates knockback + damage):
+        # rattle the bar and kick up dust at the player's feet locally.
+        if player is not None and player.health is not None:
+            if prev_hp is not None and player.health < prev_hp:
+                hp_rattle_ms = pg.time.get_ticks()
+                hb = player.hitbox_rect()
+                world_renderer.break_system.spawn_dust((hb.centerx, hb.bottom), hp_rattle_ms)
+            prev_hp = player.health
+        shake = hud_render.health_bar_shake(hp_rattle_ms, pg.time.get_ticks())
+        hud_render.draw_health_bar(screen.surface, player, shake=shake)
         if build_mode:
             hud_render.draw_build_indicator(screen.surface)
         if dead:

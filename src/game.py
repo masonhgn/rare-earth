@@ -11,6 +11,7 @@
 # highlight), then the screen-space ui is drawn directly on top.
 
 import os
+import random
 
 import pygame as pg
 
@@ -30,6 +31,7 @@ from mob import MobSystem
 from combat import CombatSystem
 from exchange import ExchangePanel
 from settings_panel import SettingsPanel
+from player_panel import PlayerPanel
 from hud_tabs import HudTabs
 from display import DisplayService
 from spot_market import SpotMarket
@@ -122,12 +124,17 @@ class Game:
             on_quit=self.stop,
             on_title=self._back_to_title,
         )
-        # hud tabs anchored to the right edge — quick toggles for the
-        # inventory and the settings modal.
+        # character/stats modal (skills + derived stats), opened from its hud tab.
+        self.player_panel = PlayerPanel()
+        # hud tabs anchored to the right edge — quick toggles for the character
+        # sheet, inventory, and the settings modal.
         self.hud_tabs = HudTabs(self.screen, [
-            ('inventory', 'src/data/sprites/ui/tabs/backpack.png', self.inventory.toggle),
+            ('player', 'src/data/sprites/ui/tabs/player.png', self._toggle_player),
+            ('inventory', 'src/data/sprites/ui/tabs/backpack.png', self.toggle_inventory),
             ('settings', 'src/data/sprites/ui/tabs/settings.png', self._toggle_settings),
         ])
+        # skill level-up toast queue (drains world.pending_level_ups each frame).
+        self.level_toasts = hud_render.LevelUpToasts()
         # screen-space overlays (diagnostics, day counter, minimap, hover
         # tooltip, held item) — reads display state off this Game.
         self.hud_overlay = HudOverlay(self)
@@ -223,12 +230,14 @@ class Game:
         if self.exchange_panel.open:
             self.close_exchange_panel()
         self.factory_panel.open_for(entity, (self.screen.width, self.screen.height))
+        self.player_panel.close()
         self.inventory.open = True
 
     def open_exchange_panel(self, entity) -> None:
         if self.factory_panel.open:
             self.close_factory_panel()
         self.exchange_panel.open_for(entity, (self.screen.width, self.screen.height))
+        self.player_panel.close()
         self.inventory.open = True
 
     def close_exchange_panel(self) -> None:
@@ -281,12 +290,32 @@ class Game:
         # "the display key" since before borderless existed.
         self.display.cycle_mode()
 
+    # the backpack, settings, and character sheet are mutually exclusive —
+    # opening any one closes the other two.
+
+    def open_settings(self) -> None:
+        self.inventory.open = False
+        self.player_panel.close()
+        self.settings_panel.open_panel(self.display.screen_size)
+
     def _toggle_settings(self) -> None:
-        # called from the settings hud tab. open if closed, close if open.
+        # called from the settings hud tab (and ESC). open if closed, else close.
         if self.settings_panel.open:
             self.settings_panel.close()
         else:
-            self.settings_panel.open_panel(self.display.screen_size)
+            self.open_settings()
+
+    def _toggle_player(self) -> None:
+        if not self.player_panel.open:
+            self.inventory.open = False
+            self.settings_panel.close()
+        self.player_panel.toggle()
+
+    def toggle_inventory(self) -> None:
+        if not self.inventory.open:
+            self.player_panel.close()
+            self.settings_panel.close()
+        self.inventory.toggle()
 
     def toggle_map(self) -> None:
         # Tab toggles the full-screen world map. opening it closes any other
@@ -302,6 +331,8 @@ class Game:
             self.close_exchange_panel()
         if self.settings_panel.open:
             self.settings_panel.close()
+        if self.player_panel.open:
+            self.player_panel.close()
         self._deposit_held_item()
         self.map_view.open = True
 
@@ -325,7 +356,7 @@ class Game:
         facing = 'left' if target.center[0] < player.center[0] else 'right'
         self.start_attack(facing)
         movement.knock_back(player, target)
-        self.combat.hit(target, pg.time.get_ticks())
+        self.combat.hit(player, target, pg.time.get_ticks())
 
     def _respawn_player(self, player) -> None:
         # on death: drop the whole inventory where the player fell, then
@@ -339,7 +370,7 @@ class Game:
         self.pending_action = None
         # snap the camera to the respawn point now (it already followed the
         # death spot earlier this frame) so there's no one-frame jump.
-        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=(sw, sh))
+        self.screen.camera.follow((player.world_x, player.world_y), sprite_size=player.sprite_dims)
 
     # --- main loop ---
 
@@ -422,10 +453,17 @@ class Game:
         elif player.path:
             moved_dx, moved_dy = movement.follow_path(player, self.world, self.dt)
         # knockback impulse (from being hit) layered on top of normal movement;
-        # kick up dust where the player lands once the impulse runs out.
-        if movement.apply_knockback(self.world, player, self.dt):
+        # kick up a light dust trail while sliding, and a bigger puff where the
+        # player lands once the impulse runs out.
+        sliding = player.knockback_x or player.knockback_y
+        landed = movement.apply_knockback(self.world, player, self.dt)
+        if sliding:
             hb = player.hitbox_rect()
-            self.break_system.spawn_dust((hb.centerx, hb.bottom), pg.time.get_ticks())
+            pos = (hb.centerx, hb.bottom)
+            if landed:
+                self.break_system.spawn_dust(pos, pg.time.get_ticks())
+            elif random.random() < 0.5:              # throttle: ~1 puff / 2 frames
+                self.break_system.spawn_dust(pos, pg.time.get_ticks(), count=2)
         movement.clamp_player_to_bounds(self.world)
 
         # one canonical place to update the player's facing/animation state,
@@ -515,7 +553,14 @@ class Game:
         self.factory_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.exchange_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
         self.settings_panel.render(self.screen.surface, (self.screen.width, self.screen.height))
+        self.player_panel.render(self.screen.surface, (self.screen.width, self.screen.height),
+                                 self.world.get_player())
         self.map_view.render(self.screen.surface, (self.screen.width, self.screen.height), self.screen.camera)
+        # skill feedback: level-up toasts + a gated-break message.
+        now_ms = pg.time.get_ticks()
+        self.level_toasts.pump(self.world, now_ms)
+        self.level_toasts.render(self.screen.surface, now_ms)
+        hud_render.draw_gate_message(self.screen.surface, self.break_system, now_ms)
         if self.build_mode:
             self._render_build_indicator()
         self.hud_overlay.render_cursor()

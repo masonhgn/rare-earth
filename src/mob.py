@@ -105,10 +105,16 @@ class MobSystem:
                 movement.update_player_animation(mob, *moved)
 
             # decay any knockback this mob is under (e.g. from a player hit);
-            # kick up dust where it lands once the impulse runs out.
-            if movement.apply_knockback(self.world, mob, dt):
+            # trail dust while it slides, and a bigger puff where it lands.
+            sliding = mob.knockback_x or mob.knockback_y
+            landed = movement.apply_knockback(self.world, mob, dt)
+            if sliding:
                 hb = mob.hitbox_rect()
-                self.break_system.spawn_dust((hb.centerx, hb.bottom), pg.time.get_ticks())
+                pos = (hb.centerx, hb.bottom)
+                if landed:
+                    self.break_system.spawn_dust(pos, pg.time.get_ticks())
+                elif random.random() < 0.5:
+                    self.break_system.spawn_dust(pos, pg.time.get_ticks(), count=2)
 
     def _maybe_attack(self, mob, ms, spec, dist, player, pcx, mcx, now_ms) -> None:
         # melee swing when in range + off cooldown: face the player, knock them
@@ -125,7 +131,7 @@ class MobSystem:
             facing = 'left' if pcx < mcx else 'right'
             mob.anim.play_once('attacking_' + facing, now_ms)
         movement.knock_back(mob, player)
-        self.combat.hit(player, now_ms)
+        self.combat.hit(mob, player, now_ms)
         ms['attack_cd'] = spec.get('attack_period', 1.0) * random.uniform(0.8, 1.2)
 
     # --- behaviors ---

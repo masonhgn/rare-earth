@@ -108,6 +108,23 @@ class EntityPrototype:
     # placed on (e.g. "grass" for crops). None = placeable on any valid tile.
     plant_on: str | None = None
 
+    # --- progression (skills.py) --------------------------------------------
+    # combat difficulty of a mob: scales the damage it deals and the combat xp
+    # a player earns for killing it. 1 == baseline (damage 2-3). mobs only.
+    combat_level: int = 1
+
+    # ore gating + reward. mining_level is the Mining level required to break
+    # this ore (1 == no gate); mining_xp is the Mining xp awarded on break.
+    # set on ore overlay prototypes.
+    mining_level: int = 1
+    mining_xp: float = 0.0
+
+    # crop gating + reward. farming_level is the Farming level required to plant
+    # this crop (1 == no gate); farming_xp is the Farming xp awarded when a
+    # mature crop is harvested. set on crop prototypes.
+    farming_level: int = 1
+    farming_xp: float = 0.0
+
 
 _cache: dict[str, EntityPrototype] = {}
 

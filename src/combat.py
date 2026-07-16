@@ -15,10 +15,20 @@ import pygame as pg
 from item import roll_drops
 from ui_theme import get_font
 import hud_render
+import skills
+import player_ops
 
 
-# random damage dealt per landed hit (inclusive).
+# random damage dealt per landed hit (inclusive). this is the level-1 baseline;
+# a player's roll scales with their Combat level (skills.damage_range_for) and a
+# mob's with its prototype combat_level.
 DAMAGE_MIN, DAMAGE_MAX = 2, 3
+
+# combat xp per point of damage dealt; health trains at a fraction of it
+# (RuneScape-style). a kill pays a bonus scaled by the victim's combat_level.
+COMBAT_XP_PER_DAMAGE = 4.0
+HEALTH_XP_FRACTION = 0.34
+KILL_XP_PER_LEVEL = 10.0
 
 # an over-head bar stays visible this long after the last health change.
 HEALTH_BAR_VISIBLE_MS = 6000
@@ -41,22 +51,50 @@ class CombatSystem:
         self.world = world
         self.damage_numbers: list[DamageNumber] = []
 
-    def hit(self, target, now_ms: int) -> bool:
-        # deal a random DAMAGE_MIN..MAX to `target`, spawn a floating number,
-        # mark its bar visible, and remove a mob that drops to 0. returns True
-        # if the target died. no-op on non-damageable entities (health None).
+    def hit(self, attacker, target, now_ms: int) -> bool:
+        # `attacker` deals a level-scaled random hit to `target`: spawn a floating
+        # number, mark its bar visible, award the attacker combat/health xp, and
+        # remove a mob that drops to 0. returns True if the target died. no-op on
+        # non-damageable targets (health None). `attacker` may be None
+        # (environmental damage) -> base damage, no xp.
         if target.health is None:
             return False
-        amount = random.randint(DAMAGE_MIN, DAMAGE_MAX)
+        lo, hi = self._damage_range(attacker)
+        amount = random.randint(lo, hi)
         target.health = max(0, target.health - amount)
         target.last_damage_ms = now_ms
         hb = target.hitbox_rect()
         self.damage_numbers.append(DamageNumber(hb.centerx, hb.top, amount, now_ms))
-        if target.health <= 0 and not target.is_player:
+        died = target.health <= 0 and not target.is_player
+        self._award_combat_xp(attacker, target, amount, died)
+        if died:
             self._drop_loot(target)
             self.world.remove_entity(target.id)
             return True
         return False
+
+    def _damage_range(self, attacker) -> tuple:
+        # player attackers roll from their Combat level; mobs scale off their
+        # prototype combat_level; None (environmental) uses the flat base.
+        if attacker is not None and attacker.skills is not None:
+            return skills.damage_range_for(skills.level_of(attacker.skills, 'combat'))
+        if attacker is not None:
+            clvl = getattr(attacker.prototype, 'combat_level', 1) or 1
+            bonus = (clvl - 1) // 3
+            return (DAMAGE_MIN + bonus, DAMAGE_MAX + bonus)
+        return (DAMAGE_MIN, DAMAGE_MAX)
+
+    def _award_combat_xp(self, attacker, target, amount: int, died: bool) -> None:
+        # only players carry a skills component; grant combat xp scaled by the
+        # damage dealt (plus a kill bonus from the victim's combat_level) and a
+        # fraction of it to health. no-op for mob/None attackers.
+        if attacker is None or attacker.skills is None:
+            return
+        combat_xp = amount * COMBAT_XP_PER_DAMAGE
+        if died:
+            combat_xp += (getattr(target.prototype, 'combat_level', 1) or 1) * KILL_XP_PER_LEVEL
+        player_ops.grant_xp(self.world, attacker, 'combat', combat_xp)
+        player_ops.grant_xp(self.world, attacker, 'health', combat_xp * HEALTH_XP_FRACTION)
 
     def _drop_loot(self, entity) -> None:
         # spawn a dying mob's loot (prototype.drops) where it fell.

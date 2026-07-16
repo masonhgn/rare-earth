@@ -26,6 +26,9 @@ from item import roll_drops
 from prototype import load_prototype
 from world import tile_center
 import interaction
+import crop as crop_ops
+import skills
+import player_ops
 
 
 # --- transient visual effects: break state + procedural chunk particles ---
@@ -131,25 +134,40 @@ class BreakSystem:
 
         self.breaking: BreakState | None = None
         self.particles: list[Particle] = []
+        # transient "Requires Mining level N" feedback set when a break is gated,
+        # drained by the HUD for a brief on-screen message. (text, born_ms).
+        self.gate_msg: tuple[str, int] | None = None
 
-    def spawn_dust(self, world_pos: tuple[float, float], now_ms: int) -> None:
+    def spawn_dust(self, world_pos: tuple[float, float], now_ms: int, count: int = 6) -> None:
         # kick up a small dust puff at world_pos (e.g. where a knocked-back body
-        # lands). feeds the same particle list as break chunks, so it ticks and
-        # renders for free.
-        self.particles.extend(spawn_dust_puff(world_pos, now_ms))
+        # lands, or a lighter trail while it slides). feeds the same particle
+        # list as break chunks, so it ticks and renders for free.
+        self.particles.extend(spawn_dust_puff(world_pos, now_ms, count=count))
 
     # --- public api ---
 
     def try_acquire_target(self, tile: tuple[int, int]):
         # (prototype, entity_id_or_None) for whatever's breakable at `tile` and
         # in reach, or None. detection is shared via interaction.breakable_at;
-        # the reach gate is break-specific.
+        # the reach gate is break-specific, as is the Mining-level gate.
         if not self.world.tile_in_reach(*tile):
             return None
-        return interaction.breakable_at(self.world, tile)
+        found = interaction.breakable_at(self.world, tile)
+        if found is None:
+            return None
+        proto = found[0]
+        if not interaction.can_mine(self.world.entities.get('player'), proto):
+            req = getattr(proto, 'mining_level', 1) or 1
+            self.gate_msg = (f'Requires Mining level {req}', pg.time.get_ticks())
+            return None
+        return found
 
     def start_break(self, proto, tile: tuple[int, int], *, entity_id: str | None) -> None:
         break_time = proto.break_time or 0.0
+        # higher Mining level breaks faster (never instant if it wasn't already).
+        player = self.world.entities.get('player')
+        if break_time > 0 and player is not None and player.skills is not None:
+            break_time *= skills.break_time_scale(skills.level_of(player.skills, 'mining'))
         center = tile_center(tile)
         if break_time <= 0:
             # instant break: finalize immediately, no BreakState lifecycle.
@@ -246,8 +264,19 @@ class BreakSystem:
         return (jx, jy, flash_alpha)
 
     def _finalize_entity(self, entity_id: str, world_pos: tuple[float, float]) -> None:
-        drops = self.world.break_entity(entity_id)
+        # capture proto + crop stage before break_entity removes the instance, so
+        # we can award mining/farming xp and apply the Farming yield bonus.
+        ent = self.world.entities.get(entity_id)
+        proto = ent.prototype if ent is not None else None
+        crop = ent.components.get('crop') if ent is not None else None
+        player = self.world.entities.get('player')
+        farming_level = (skills.level_of(player.skills, 'farming')
+                         if player is not None and player.skills is not None else 1)
+        drops = self.world.break_entity(entity_id, farming_level=farming_level)
         self._distribute_drops(drops, world_pos)
+        if proto is not None:
+            self._grant_mining_xp(proto)
+            self._grant_farming_xp(proto, crop)
 
     def _finalize_overlay(self, tile: tuple[int, int], world_pos: tuple[float, float]) -> None:
         tx, ty = tile
@@ -262,6 +291,25 @@ class BreakSystem:
         if self.on_tile_changed is not None:
             self.on_tile_changed(tx, ty)
         self._distribute_drops(roll_drops(proto.drops), world_pos)
+        self._grant_mining_xp(proto)
+
+    def _grant_mining_xp(self, proto) -> None:
+        # award the breaking player this prototype's mining xp (default 0, so
+        # only ore/rock protos that set mining_xp pay out).
+        xp = getattr(proto, 'mining_xp', 0.0) or 0.0
+        if xp > 0:
+            player = self.world.entities.get('player')
+            player_ops.grant_xp(self.world, player, 'mining', xp)
+
+    def _grant_farming_xp(self, proto, crop) -> None:
+        # farming xp only for harvesting a MATURE crop (an immature pull just
+        # returns the seed, so it shouldn't train the skill).
+        if proto.crop is None or crop is None:
+            return
+        xp = getattr(proto, 'farming_xp', 0.0) or 0.0
+        if xp > 0 and crop_ops.is_mature(proto.crop, crop['stage']):
+            player = self.world.entities.get('player')
+            player_ops.grant_xp(self.world, player, 'farming', xp)
 
     def _distribute_drops(self, drops: list[tuple[str, int]], world_pos: tuple[float, float]) -> None:
         # drops spawn in the world (visible at the break site), auto-pickup

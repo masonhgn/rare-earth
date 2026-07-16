@@ -4,6 +4,7 @@
     "editable": false,
     "speed": 150,
     "max_health": 20,
+    "combat_level": 5,
     "shadow": true,
     "sprite_size": [128, 128],
     "hitbox": [48, 80],
