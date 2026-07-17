@@ -32,10 +32,10 @@ from animation import AnimationLibrary
 from ui_theme import get_font
 
 
-# layer order used by Renderer.flush each frame. 'overlay' sits between
-# terrain and shadow so ore/feature decoration draws on top of the base
-# terrain but underneath everything dynamic.
-LAYERS = ['terrain', 'overlay', 'shadow', 'dropped', 'entity', 'player', 'highlight']
+# layer order used by Renderer.flush each frame. 'rock' (organic rock-patch
+# surfaces) sits over the grass base terrain; 'overlay' (ore) draws on top of
+# the rock, and both sit under everything dynamic.
+LAYERS = ['terrain', 'rock', 'overlay', 'shadow', 'dropped', 'entity', 'player', 'highlight']
 
 # how long the yellow click marker stays visible (fades to 0 over this span)
 CLICK_MARKER_MS = 500
@@ -533,9 +533,17 @@ class WorldRenderer:
         self.screen = screen
         self.world = world
         self.break_system = break_system
+        # baked rock-patch surfaces, keyed by id(patch) — one composite of the
+        # rock texture through the patch's organic mask, blitted each frame. a big
+        # world has thousands of patches, so the cache is bounded (see _evict_rock)
+        # and keyed by last-visible frame.
+        self._rock_cache: dict[int, pg.Surface] = {}
+        self._rock_used: dict[int, int] = {}
+        self._rock_frame = 0
 
     def flush(self, cam, culling, click_marker):
         self._queue_terrain(cam, culling)
+        self._queue_rock(cam, culling)
         self._queue_overlay(cam, culling)
         self._queue_entities(cam, culling)
         self._queue_dropped(cam, culling)
@@ -549,14 +557,87 @@ class WorldRenderer:
         world = self.world
         sprites = self.screen.sprites
         tx0, ty0, tx1, ty1 = culling.tile_range(cam.offset, world.width, world.height)
+        grass = sprites.get('grass')
         for ty in range(ty0, ty1):
             row = world.map_grid[ty]
             for tx in range(tx0, tx1):
-                img = sprites.get(row[tx])
+                tile_id = row[tx]
+                # 'stone' is a logical marker now; rock is painted by the rock
+                # layer, so the base under it is grass. any other tile draws
+                # normally.
+                img = grass if tile_id == 'stone' else sprites.get(tile_id)
                 if img is None:
                     continue
                 sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
                 self.screen.renderer.queue('terrain', img, (sx, sy))
+
+    def _queue_rock(self, cam, culling) -> None:
+        # blit each visible rock patch: a rock texture composited through the
+        # patch's organic mask (baked once, cached). draws over the grass base
+        # and under the ore overlay. patches only exist on freshly generated
+        # worlds — loaded/joined worlds have none yet (not saved/streamed).
+        patches = getattr(self.world, 'rock_patches', None)
+        if not patches:
+            return
+        self._rock_frame += 1
+        vr = culling.visible_world_rect(cam.offset)
+        for patch in patches:
+            rect = pg.Rect(patch['x'], patch['y'], patch['size'], patch['size'])
+            if not vr.colliderect(rect):
+                continue
+            key = id(patch)
+            surf = self._rock_cache.get(key)
+            if surf is None:
+                surf = self._bake_rock(patch)
+                self._rock_cache[key] = surf
+            self._rock_used[key] = self._rock_frame
+            sx, sy = cam.world_to_screen((patch['x'], patch['y']))
+            self.screen.renderer.queue('rock', surf, (sx, sy))
+        self._evict_rock()
+
+    def _evict_rock(self, cap: int = 48) -> None:
+        # baked patch surfaces are large and there can be thousands of patches, so
+        # keep only the most-recently-visible ones. the visible set per frame is
+        # small (patches are sparse), so this rarely evicts anything in play.
+        if len(self._rock_cache) <= cap:
+            return
+        stale = sorted(self._rock_cache, key=lambda k: self._rock_used.get(k, 0))
+        for key in stale[:len(self._rock_cache) - cap]:
+            self._rock_cache.pop(key, None)
+            self._rock_used.pop(key, None)
+
+    def _bake_rock(self, patch) -> pg.Surface:
+        # regenerate the patch's shape from its seed (not stored on the patch —
+        # see World._make_rock_patch), composite the rock texture through it, and
+        # cache the result. one-time cost per patch, blitted cheaply thereafter.
+        #
+        # the alpha SHAPE is baked at quarter resolution and smooth-scaled up: a
+        # full-res noise field costs ~135ms (a visible frame hitch when a patch
+        # scrolls in), the small one ~10ms, and the upscale antialiases the rock
+        # edge for free. the rock TEXTURE stays crisp at full resolution.
+        from rockgen import patch_mask
+        size = patch['size']
+        msize = max(48, size // 4)
+        mask = patch_mask(msize, patch['seed'])
+
+        small = pg.Surface((msize, msize))
+        px = pg.surfarray.pixels3d(small)
+        mt = mask.T                              # (y,x) mask -> (x,y) surfarray
+        px[:, :, 0] = mt; px[:, :, 1] = mt; px[:, :, 2] = mt
+        del px
+        alpha_up = pg.surfarray.array3d(
+            pg.transform.smoothscale(small, (size, size)))[:, :, 0]
+
+        tex = self.screen.sprites.get('stone')
+        surf = pg.Surface((size, size)).convert_alpha()
+        tw, th = tex.get_size()
+        for yy in range(0, size, th):
+            for xx in range(0, size, tw):
+                surf.blit(tex, (xx, yy))
+        alpha = pg.surfarray.pixels_alpha(surf)
+        alpha[:, :] = alpha_up
+        del alpha
+        return surf
 
     def _queue_overlay(self, cam, culling) -> None:
         # sparse layer (most cells are None). ore tiles use alpha so the

@@ -58,7 +58,41 @@ def load_sprites(config_file: str) -> dict[str, pg.Surface]:
     if files:
         sprites.update(_load_files(files))
     _autoscan_tiles(sprites)
+    derived = config.get('derived')
+    if derived:
+        sprites.update(_load_derived(derived, sprites))
     return sprites
+
+
+def _load_derived(spec: dict, sprites: dict[str, pg.Surface]) -> dict[str, pg.Surface]:
+    # build new sprites by flipping and/or rotating already-loaded ones, so a
+    # mirrored/turned variant (the other three rock corners, the vertical grass
+    # pinch) needs no extra art. each entry names a source `from`, an optional
+    # `flip` [horizontal, vertical], an optional `rotate` (degrees, CCW), and an
+    # optional `count`: with count, `<name>_<i>` is derived from `<from>_<i>` for
+    # i in 0..count-1; without it, `<name>` is derived from `<from>` directly.
+    # flip is applied before rotate. runs last so it can reference atlas, file,
+    # and autoscanned sprites alike.
+    out: dict[str, pg.Surface] = {}
+    for name, entry in spec.items():
+        src = entry['from']
+        fx, fy = entry.get('flip', [False, False])
+        angle = entry.get('rotate', 0)
+        count = entry.get('count')
+        if count is None:
+            out[name] = _derive(sprites[src], fx, fy, angle)
+        else:
+            for i in range(count):
+                out[f'{name}_{i}'] = _derive(sprites[f'{src}_{i}'], fx, fy, angle)
+    return out
+
+
+def _derive(surf: pg.Surface, fx: bool, fy: bool, angle: float) -> pg.Surface:
+    if fx or fy:
+        surf = pg.transform.flip(surf, fx, fy)
+    if angle:
+        surf = pg.transform.rotate(surf, angle)
+    return surf
 
 
 def _autoscan_tiles(sprites: dict[str, pg.Surface]) -> None:

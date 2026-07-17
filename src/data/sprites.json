@@ -11,15 +11,12 @@
             "cinder": [3, 0],
             "rock": [4, 0],
             "grass": [5, 0],
-            "planks": [6, 0]
+            "planks": [6, 0],
+            "stone": [7, 0]
         }
     },
     "files": {
         "tree": "src/data/sprites/tree.png",
-        "stone": {
-            "file": "src/data/sprites/tiles/stone_tile.png",
-            "size": [64, 64]
-        },
         "copper_ore": {
             "file": "src/data/sprites/tiles/copper_ore_tile.png",
             "size": [64, 64]

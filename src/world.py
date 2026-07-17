@@ -52,10 +52,10 @@ class World:
         self.width = 0
         self.height = 0
         # terrain is data-driven (data/worldgen.json): a base tile plus a list
-        # of {tile, count, radius} ore patches. patch counts scale with map area
-        # so ore density stays ~constant vs the 60x60 baseline. each ore patch
-        # lays stone under its cells so ore only ever sits on rock (see
-        # _scatter_patch). local import avoids a module-load cycle with worldgen.
+        # of {tile, count, radius} rock patches. patch counts scale with map area
+        # so density stays ~constant vs the 60x60 baseline. each patch is an
+        # organic mask that seeds its own ore (see _make_rock_patch). local
+        # import avoids a module-load cycle with worldgen.
         from worldgen import load_worldgen_config
         cfg = load_worldgen_config()
         area_scale = (WORLD_WIDTH * WORLD_HEIGHT) / (60 * 60)
@@ -85,21 +85,31 @@ class World:
 
     # --- map ---
 
+    # coverage thresholds for projecting a patch mask down to the coarse gameplay
+    # grid. a tile is logical rock once >= ROCK_STONE_COV of it is covered; ore is
+    # only ever seeded where the tile is nearly solid rock, so it can't land on a
+    # ragged boundary tile. cells in between are cosmetic edge — grass for logic.
+    ROCK_STONE_COV = 0.5
+    ROCK_ORE_COV = 0.85
+    ROCK_ORE_RATE = 0.35   # chance a solid-rock cell hosts ore
+    COV_RES = 3            # mask samples per tile when measuring coverage
+
     def generate_world_map(self, width: int, height: int, *, base_tile: str,
                            patches: list[tuple[str, int, int]] | None = None) -> None:
-        # two layers: map_grid is the base terrain (always rendered),
-        # overlay_grid is a sparse decoration layer of ore/feature tiles
-        # whose sprites use alpha to let the base show through between chunks.
-        # each `patches` entry is (tile_id, num_patches, max_radius). patch
-        # placement is per-cell probabilistic with linear falloff from center
-        # so edges are soft rather than hard circles.
+        # rock is no longer built from tiles. each patch is an organic mask (see
+        # rockgen); the renderer composites a rock texture through it, so the
+        # boundary is a smooth curve instead of edge/corner tiles. here we only
+        # keep the *gameplay* projection: map_grid marks solid-rock cells as
+        # 'stone', overlay_grid seeds ore on near-solid cells, and rock_patches
+        # holds the mask descriptors the renderer bakes visuals from.
         self.width = width
         self.height = height
         self.map_grid = [[base_tile for _ in range(width)] for _ in range(height)]
         self.overlay_grid: list[list[str | None]] = [[None] * width for _ in range(height)]
-        for tile_id, count, max_radius in (patches or []):
+        self.rock_patches: list[dict] = []
+        for ore_id, count, max_radius in (patches or []):
             for _ in range(count):
-                self._scatter_patch(tile_id, max_radius)
+                self._make_rock_patch(ore_id, max_radius)
 
     def load_grids(self, width: int, height: int, map_grid, overlay_grid) -> None:
         # install a new (already-decoded) terrain map and wipe all placed-entity
@@ -111,37 +121,58 @@ class World:
         self.height = height
         self.map_grid = map_grid
         self.overlay_grid = overlay_grid
+        # loaded worlds carry no mask descriptors (they aren't saved yet), so the
+        # renderer draws no organic rock for them — see TODO on save/net support.
+        self.rock_patches = []
         self.entities.clear()
         self.tile_index.clear()
         self.dropped.clear()
         self.spatial_grid.clear()
 
-    def _scatter_patch(self, tile_id: str, max_radius: int) -> None:
-        cx = random.randint(0, self.width - 1)
-        cy = random.randint(0, self.height - 1)
+    def _make_rock_patch(self, ore_id: str, max_radius: int) -> None:
+        # generate one organic rock outcrop. the mask is the visual truth, but we
+        # DON'T store it — at 1000x1000 there are thousands of patches and full
+        # masks were gigabytes (hung world-gen). instead we sample coverage from a
+        # cheap low-res mask, project that onto the coarse grid + ore, and stash
+        # only a compact descriptor (pos, size, seed). the renderer regenerates
+        # the same shape at full pixel resolution from `seed` when it bakes — the
+        # mask is scale-invariant, so the coverage here and the visual agree.
+        from rockgen import patch_mask, tile_coverage
         radius = random.randint(max(2, max_radius - 2), max_radius)
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                x, y = cx + dx, cy + dy
-                if not (0 <= x < self.width and 0 <= y < self.height):
+        n = radius * 2 + 2                    # patch span in tiles (blob + margin)
+        seed = random.randrange(2 ** 31)
+        # coverage only needs the gross shape, so run few octaves (cheap); the
+        # renderer bakes the same seed at full detail. fixed fBm normalization
+        # keeps the two agreeing on which tiles are rock.
+        cov = tile_coverage(patch_mask(n * self.COV_RES, seed, octaves=3),
+                            self.COV_RES)  # (n, n) 0..1
+
+        # random top-left tile; allow the patch to hang partly off the map (writes
+        # are clipped below, the renderer culls the off-screen part).
+        lo_x, hi_x = -radius, self.width - n + radius
+        lo_y, hi_y = -radius, self.height - n + radius
+        tx0 = random.randint(min(lo_x, hi_x), max(lo_x, hi_x))
+        ty0 = random.randint(min(lo_y, hi_y), max(lo_y, hi_y))
+        self.rock_patches.append({
+            'x': tx0 * TILE_LENGTH, 'y': ty0 * TILE_LENGTH,
+            'size': n * TILE_LENGTH, 'seed': seed,
+        })
+
+        # project coverage onto the gameplay grid. patches only ever ADD rock, so
+        # overlapping outcrops union cleanly (we never write grass back).
+        for j in range(n):
+            ty = ty0 + j
+            if not (0 <= ty < self.height):
+                continue
+            for i in range(n):
+                tx = tx0 + i
+                if not (0 <= tx < self.width):
                     continue
-                dist = (dx * dx + dy * dy) ** 0.5
-                if dist > radius:
-                    continue
-                # a rocky outcrop: two independent falloff rolls so the deposit
-                # has soft edges. an ore cell ALWAYS gets stone beneath it (ore
-                # only ever sits on stone, never grass); bare stone fills in
-                # around the ore so the patch reads as a rock field with veins
-                # rather than ore floating on grass. the ore sprites are ~90%
-                # transparent, so the stone shows through prominently.
-                p = 1 - (dist / radius)
-                ore_here = random.random() < p
-                stone_here = random.random() < p
-                if ore_here:
-                    self.overlay_grid[y][x] = tile_id
-                    self.map_grid[y][x] = 'stone'
-                elif stone_here:
-                    self.map_grid[y][x] = 'stone'
+                c = cov[j, i]
+                if c >= self.ROCK_STONE_COV:
+                    self.map_grid[ty][tx] = 'stone'
+                if c >= self.ROCK_ORE_COV and random.random() < self.ROCK_ORE_RATE:
+                    self.overlay_grid[ty][tx] = ore_id
 
     def in_bounds_tile(self, tx: int, ty: int) -> bool:
         return 0 <= tx < self.width and 0 <= ty < self.height
