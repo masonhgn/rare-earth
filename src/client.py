@@ -22,7 +22,7 @@ import threading
 
 import pygame as pg
 
-from config import TITLE, TILE_LENGTH, ITEM_ICON_SIZE
+from config import TITLE, TILE_LENGTH, ITEM_ICON_SIZE, TABS_DIR
 from world import World, world_to_tile, in_reach
 from render import Screen, Minimap, WorldRenderer, MapView, get_overview
 from breaking import BreakSystem, BreakState
@@ -44,11 +44,13 @@ import hud_render
 import interaction
 import movement
 import netproto
+import keybinds
 import skills
 
-PREDICT_CORRECT = 10.0      # per-second rate the local player eases to server truth
-INTERP_RATE = 12.0          # per-second rate remote entities ease to their target
-SNAP_DIST = 96.0            # local desync past this snaps instead of easing (respawn/teleport)
+# net smoothing feel (data/balance.json): how fast the local player eases to
+# server truth, how fast remote entities ease to their target, and the desync
+# past which we snap instead of easing (respawn / teleport).
+from balance import PREDICT_CORRECT, INTERP_RATE, SNAP_DIST
 
 
 class _NetSpotMarket(SpotMarket):
@@ -204,10 +206,12 @@ def _step_remote(world, local_id, dt) -> None:
 
 # --- input + hud ---
 
-def _poll_move_dir():
+def _poll_move_dir(kb):
     keys = pg.key.get_pressed()
-    dx = (1 if keys[pg.K_d] else 0) - (1 if keys[pg.K_a] else 0)
-    dy = (1 if keys[pg.K_s] else 0) - (1 if keys[pg.K_w] else 0)
+    dx = (1 if keybinds.pressed(keys, kb['move_right']) else 0) \
+        - (1 if keybinds.pressed(keys, kb['move_left']) else 0)
+    dy = (1 if keybinds.pressed(keys, kb['move_down']) else 0) \
+        - (1 if keybinds.pressed(keys, kb['move_up']) else 0)
     return (dx, dy)
 
 
@@ -341,6 +345,7 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
 
     pg.init()
     pg.display.set_caption(f'{TITLE} (client {local_id})')
+    kb = keybinds.load_keybinds()   # rebindable controls (settings.json)
     settings = load_settings()
     screen = Screen(settings['screen_width'], settings['screen_height'],
                     display_mode=settings['display_mode'])
@@ -435,9 +440,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
             settings_panel.close()
         inventory.toggle()
     hud_tabs = HudTabs(screen, [
-        ('player', 'src/data/sprites/ui/tabs/player.png', _toggle_player),
-        ('inventory', 'src/data/sprites/ui/tabs/backpack.png', _toggle_inventory),
-        ('settings', 'src/data/sprites/ui/tabs/settings.png', _toggle_settings),
+        ('player', f'{TABS_DIR}/player.png', _toggle_player),
+        ('inventory', f'{TABS_DIR}/backpack.png', _toggle_inventory),
+        ('settings', f'{TABS_DIR}/settings.png', _toggle_settings),
     ])
     level_toasts = hud_render.LevelUpToasts()
 
@@ -453,7 +458,7 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
             if event.type == pg.QUIT:
                 running = False
             elif event.type == pg.KEYDOWN:
-                if event.key == pg.K_ESCAPE:
+                if event.key == kb['menu']:
                     # close the top open overlay; if none, open the settings modal.
                     if map_view.open:
                         map_view.close()
@@ -471,15 +476,15 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                             running = False
                     else:
                         _open_settings()
-                elif event.key == pg.K_b:
+                elif event.key == kb['inventory']:
                     _toggle_inventory()
-                elif event.key == pg.K_g:
+                elif event.key == kb['build']:
                     build_mode = not build_mode
-                elif event.key == pg.K_TAB:
+                elif event.key == kb['map']:
                     map_view.toggle()
-                elif event.key == pg.K_F2:
+                elif event.key == kb['display_mode']:
                     display.cycle_mode()
-                elif event.key == pg.K_F3:
+                elif event.key == kb['hud']:
                     hud.toggle()
             elif event.type == pg.MOUSEWHEEL:
                 if exchange_panel.open:
@@ -603,7 +608,7 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         dead = player is not None and player.health is not None and player.health <= 0
 
         # movement intent (frozen while dead); send only on change
-        move_dir = (0, 0) if dead else _poll_move_dir()
+        move_dir = (0, 0) if dead else _poll_move_dir(kb)
         if move_dir != last_dir:
             try:
                 netproto.send(sock, {'type': 'move', 'dx': move_dir[0], 'dy': move_dir[1]})

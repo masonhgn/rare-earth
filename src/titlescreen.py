@@ -12,6 +12,7 @@
 import pygame as pg
 
 from ui_theme import get_font
+from settings import load_settings
 
 _BG = (24, 28, 34)
 _PANEL = (40, 46, 54)
@@ -20,10 +21,6 @@ _BORDER = (90, 100, 115)
 _TEXT = (235, 235, 235)
 _ACCENT = (235, 200, 120)
 _MUTED = (150, 158, 168)
-
-# fixed server the Multiplayer button connects to (no in-game address box).
-_DEFAULT_HOST = '167.99.234.25'
-_DEFAULT_PORT = 5555
 
 
 def _button(surface, rect, label, font, hover) -> None:
@@ -47,7 +44,11 @@ def show_title(surface) -> tuple | None:
     mp_rect = pg.Rect(bx, 358, bw, bh)
     quit_rect = pg.Rect(bx, 470, bw, bh)
 
-    mp_choice = ('multiplayer', _DEFAULT_HOST, _DEFAULT_PORT)
+    # multiplayer target from settings (settings.json overrides the default).
+    _s = load_settings()
+    mp_host = _s.get('server_host', '167.99.234.25')
+    mp_port = int(_s.get('server_port', 5555))
+    mp_choice = ('multiplayer', mp_host, mp_port)
 
     while True:
         clock.tick(60)
@@ -76,7 +77,7 @@ def show_title(surface) -> tuple | None:
         _button(surface, mp_rect, 'Multiplayer', btn_font, mp_rect.collidepoint(mouse))
 
         # static server address the Multiplayer button uses (display-only).
-        srv_lbl = small_font.render(f'Server: {_DEFAULT_HOST}', True, _MUTED)
+        srv_lbl = small_font.render(f'Server: {mp_host}', True, _MUTED)
         surface.blit(srv_lbl, srv_lbl.get_rect(center=(cx, mp_rect.bottom + 24)))
 
         _button(surface, quit_rect, 'Quit', btn_font, quit_rect.collidepoint(mouse))

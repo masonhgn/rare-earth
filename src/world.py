@@ -23,6 +23,7 @@ from entity import Entity
 from prototype import load_prototype
 from item import DroppedItem, load_item, roll_drops
 import crop as crop_ops
+import balance
 
 
 def world_to_tile(world_pos: tuple[float, float]) -> tuple[int, int]:
@@ -86,13 +87,14 @@ class World:
     # --- map ---
 
     # coverage thresholds for projecting a patch mask down to the coarse gameplay
-    # grid. a tile is logical rock once >= ROCK_STONE_COV of it is covered; ore is
-    # only ever seeded where the tile is nearly solid rock, so it can't land on a
-    # ragged boundary tile. cells in between are cosmetic edge — grass for logic.
-    ROCK_STONE_COV = 0.5
-    ROCK_ORE_COV = 0.85
-    ROCK_ORE_RATE = 0.35   # chance a solid-rock cell hosts ore
-    COV_RES = 3            # mask samples per tile when measuring coverage
+    # grid (all from data/balance.json). a tile is logical rock once >=
+    # ROCK_STONE_COV of it is covered; ore is only ever seeded where the tile is
+    # nearly solid rock (ROCK_ORE_COV), so it can't land on a ragged boundary
+    # tile. cells in between are cosmetic edge — grass for logic.
+    ROCK_STONE_COV = balance.ROCK_STONE_COV
+    ROCK_ORE_COV = balance.ROCK_ORE_COV
+    ROCK_ORE_RATE = balance.ROCK_ORE_RATE   # chance a solid-rock cell hosts ore
+    COV_RES = balance.ROCK_COV_RES          # mask samples per tile when measuring coverage
 
     def generate_world_map(self, width: int, height: int, *, base_tile: str,
                            patches: list[tuple[str, int, int]] | None = None) -> None:

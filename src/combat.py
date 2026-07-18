@@ -18,24 +18,13 @@ import hud_render
 import skills
 import player_ops
 
-
-# random damage dealt per landed hit (inclusive). this is the level-1 baseline;
-# a player's roll scales with their Combat level (skills.damage_range_for) and a
-# mob's with its prototype combat_level.
-DAMAGE_MIN, DAMAGE_MAX = 2, 3
-
-# combat xp per point of damage dealt; health trains at a fraction of it
-# (RuneScape-style). a kill pays a bonus scaled by the victim's combat_level.
-COMBAT_XP_PER_DAMAGE = 4.0
-HEALTH_XP_FRACTION = 0.34
-KILL_XP_PER_LEVEL = 10.0
-
-# an over-head bar stays visible this long after the last health change.
-HEALTH_BAR_VISIBLE_MS = 6000
-
-# floating damage-number lifetime + how far it rises over that life.
-FLOAT_LIFETIME_MS = 850
-FLOAT_RISE_PX = 30
+# balance tunables (data/balance.json). DAMAGE_MIN/MAX are the level-1 baseline;
+# a player's roll scales with Combat level and a mob's with combat_level. combat
+# xp is per point of damage; health trains at a fraction; a kill pays a bonus.
+from balance import (
+    DAMAGE_MIN, DAMAGE_MAX, COMBAT_XP_PER_DAMAGE, HEALTH_XP_FRACTION,
+    KILL_XP_PER_LEVEL, HEALTH_BAR_VISIBLE_MS, FLOAT_LIFETIME_MS, FLOAT_RISE_PX,
+)
 
 
 @dataclass

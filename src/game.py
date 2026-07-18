@@ -15,7 +15,7 @@ import random
 
 import pygame as pg
 
-from config import TILE_LENGTH, TITLE, DAY_LENGTH_SEC, ITEMS_DIR
+from config import TILE_LENGTH, TITLE, DAY_LENGTH_SEC, ITEMS_DIR, DEATH_SCREEN_SEC, TABS_DIR
 from world import World
 from entity import Entity
 from prototype import load_prototype
@@ -42,13 +42,10 @@ from dev_console import DevConsole
 from save_state import save_game, load_game, save_exists
 import movement
 import input_handler
+import keybinds
 import hud_render
 import worldgen
 import player_ops
-
-
-# how long the black "YOU DIED" screen holds before the player respawns.
-DEATH_SCREEN_SEC = 2.0
 
 
 class Game:
@@ -65,6 +62,8 @@ class Game:
         pg.display.set_caption(TITLE)
 
         self.settings = load_settings()
+        # rebindable controls (settings.json), resolved once now that pygame is up.
+        self.keybinds = keybinds.load_keybinds()
         self.screen = Screen(
             self.settings['screen_width'],
             self.settings['screen_height'],
@@ -129,9 +128,9 @@ class Game:
         # hud tabs anchored to the right edge — quick toggles for the character
         # sheet, inventory, and the settings modal.
         self.hud_tabs = HudTabs(self.screen, [
-            ('player', 'src/data/sprites/ui/tabs/player.png', self._toggle_player),
-            ('inventory', 'src/data/sprites/ui/tabs/backpack.png', self.toggle_inventory),
-            ('settings', 'src/data/sprites/ui/tabs/settings.png', self._toggle_settings),
+            ('player', f'{TABS_DIR}/player.png', self._toggle_player),
+            ('inventory', f'{TABS_DIR}/backpack.png', self.toggle_inventory),
+            ('settings', f'{TABS_DIR}/settings.png', self._toggle_settings),
         ])
         # skill level-up toast queue (drains world.pending_level_ups each frame).
         self.level_toasts = hud_render.LevelUpToasts()
@@ -441,7 +440,7 @@ class Game:
         self.day_clock.tick(self.dt)
         self.spot_market.tick(self.dt)
         player = self.world.get_player()
-        dx, dy = (0.0, 0.0) if self.dev_console.open else input_handler.poll_movement(player, self.dt)
+        dx, dy = (0.0, 0.0) if self.dev_console.open else input_handler.poll_movement(player, self.dt, self.keybinds)
         moved_dx = moved_dy = 0.0
         if dx or dy:
             # manual WASD preempts any active path. per-axis collision (solids

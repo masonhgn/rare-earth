@@ -24,6 +24,10 @@
 
 import numpy as np
 
+# shape defaults live in data/balance.json (headless-safe: balance pulls in only
+# json + config, no pygame). callers can still override per-call via kwargs.
+from balance import ROCK_OCTAVES, ROCK_WARP, ROCK_BASE_LEVEL, ROCK_EDGE_BIAS
+
 
 def _smoothstep(t: np.ndarray) -> np.ndarray:
     return t * t * (3.0 - 2.0 * t)
@@ -60,8 +64,8 @@ def _fbm(u: np.ndarray, v: np.ndarray, rng, octaves: int, freq0: float,
     return total * (1.0 - gain)
 
 
-def patch_mask(size: int, seed: int, *, octaves: int = 5, warp: float = 0.32,
-               base_level: float = 0.34, edge_bias: float = 0.62) -> np.ndarray:
+def patch_mask(size: int, seed: int, *, octaves: int = ROCK_OCTAVES, warp: float = ROCK_WARP,
+               base_level: float = ROCK_BASE_LEVEL, edge_bias: float = ROCK_EDGE_BIAS) -> np.ndarray:
     # returns a (size, size) uint8 array, 255 = rock, 0 = grass. tuning knobs:
     #   octaves    — noise detail; more = finer frays (and a bit more cost).
     #   warp       — domain-warp strength; higher = more twisted, less blobby.

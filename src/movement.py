@@ -5,13 +5,13 @@
 # them. nothing here holds state — the player entity and world carry it.
 
 from config import TILE_LENGTH
+from balance import KNOCKBACK_TILES, KNOCKBACK_DECAY
 
 
 # knockback imparted to a target when a hit lands; decays in apply_knockback.
 # total travel ~= KNOCKBACK_SPEED / KNOCKBACK_DECAY = KNOCKBACK_TILES tiles.
-# distance is set by KNOCKBACK_TILES; DECAY controls how snappy the slide is.
-KNOCKBACK_TILES = 2.5                             # total travel, in tiles
-KNOCKBACK_DECAY = 14.0                            # per-second decay (higher = fades faster)
+# KNOCKBACK_TILES / KNOCKBACK_DECAY are balance tunables (data/balance.json);
+# the initial px/s speed is derived from them.
 KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY * KNOCKBACK_TILES   # initial px/s
 
 # diagonal movement normalization (1/sqrt(2)) so 45deg movement isn't sqrt(2)

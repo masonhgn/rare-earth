@@ -14,6 +14,28 @@ from config import (
 #   'borderless' -> NOFRAME at the desktop's native resolution
 DISPLAY_MODES = ('windowed', 'fullscreen', 'borderless')
 
+# default multiplayer server (used when settings.json omits it).
+DEFAULT_SERVER_HOST = '167.99.234.25'
+DEFAULT_SERVER_PORT = 5555
+
+# rebindable controls: action -> pygame key NAME (human-editable in settings.json).
+# keybinds.load_keybinds() resolves these to key codes and back-fills any the
+# user's file omits. movement keys should stay printable (get_pressed indexing).
+DEFAULT_KEYBINDS = {
+    'move_up': 'w',
+    'move_down': 's',
+    'move_left': 'a',
+    'move_right': 'd',
+    'inventory': 'b',
+    'build': 'g',
+    'map': 'tab',
+    'display_mode': 'f2',
+    'hud': 'f3',
+    'menu': 'escape',
+    'dev_console': '`',
+    'quit': 'q',
+}
+
 
 _defaults = {
     'screen_width': SCREEN_WIDTH,
@@ -21,6 +43,11 @@ _defaults = {
     'display_mode': 'windowed',
     'show_hud': True,
     'fps_cap': FPS,
+    # multiplayer server the title screen's Multiplayer button connects to.
+    # edit settings.json to point at a different host without touching source.
+    'server_host': DEFAULT_SERVER_HOST,
+    'server_port': DEFAULT_SERVER_PORT,
+    'keybinds': dict(DEFAULT_KEYBINDS),
 }
 
 

@@ -16,6 +16,7 @@ from prototype import load_prototype
 from world import world_to_tile, tile_center
 import interaction
 import movement
+import keybinds
 
 
 # offset for centering the held item icon on the cursor
@@ -94,20 +95,20 @@ class AttackOnArrival(PendingAction):
             game.player_attack(self.mob)
 
 
-def poll_movement(player, dt: float) -> tuple[float, float]:
+def poll_movement(player, dt: float, kb: dict) -> tuple[float, float]:
     # returns the (dx, dy) the player would move this frame in pixels.
     # animation state is set by Game._update_player_animation after movement
     # is resolved — keeping it here would double-update and clobber the
     # path-follower's facing during pure-vertical segments.
     keys = pg.key.get_pressed()
     vx = vy = 0.0
-    if keys[pg.K_w]:
+    if keybinds.pressed(keys, kb['move_up']):
         vy -= 1
-    if keys[pg.K_s]:
+    if keybinds.pressed(keys, kb['move_down']):
         vy += 1
-    if keys[pg.K_a]:
+    if keybinds.pressed(keys, kb['move_left']):
         vx -= 1
-    if keys[pg.K_d]:
+    if keybinds.pressed(keys, kb['move_right']):
         vx += 1
 
     return movement.input_delta(player, vx, vy, dt)
@@ -122,7 +123,7 @@ def event_loop(game) -> None:
             # the dev console captures all keys while open; backtick toggles it.
             if game.dev_console.open:
                 game.dev_console.handle_event(event)
-            elif event.key == pg.K_BACKQUOTE:
+            elif event.key == game.keybinds['dev_console']:
                 game.dev_console.toggle()
             else:
                 _on_keydown(game, event)
@@ -158,20 +159,21 @@ def event_loop(game) -> None:
 def _on_keydown(game, event) -> None:
     key = event.key
     mods = pg.key.get_mods()
+    kb = game.keybinds
 
-    if key == pg.K_b:
+    if key == kb['inventory']:
         game.toggle_inventory()
-    elif key == pg.K_g:
+    elif key == kb['build']:
         # toggle build mode: left-click then places the held item as a
         # tile-locked entity, with a green/red highlight on the hovered tile.
         game.build_mode = not game.build_mode
-    elif key == pg.K_TAB:
+    elif key == kb['map']:
         game.toggle_map()
-    elif key == pg.K_F2:
+    elif key == kb['display_mode']:
         game.toggle_fullscreen()
-    elif key == pg.K_F3:
+    elif key == kb['hud']:
         game.hud.toggle()
-    elif key == pg.K_ESCAPE:
+    elif key == kb['menu']:
         # close the highest-priority open overlay first; if none are open,
         # bring up the settings modal (manual save + display mode).
         if game.map_view.open:
@@ -186,7 +188,7 @@ def _on_keydown(game, event) -> None:
             game.close_factory_panel()
         else:
             game.open_settings()
-    elif key == pg.K_q and (mods & pg.KMOD_CTRL):
+    elif key == kb['quit'] and (mods & pg.KMOD_CTRL):
         game.running = False
 
 

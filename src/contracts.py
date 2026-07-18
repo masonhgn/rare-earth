@@ -39,28 +39,12 @@ import uuid
 
 import slots as slot_ops
 
-
-# board capacity. accepting a slot leaves it None (per design: no
-# refill). regenerated only at fresh world boot.
-BOARD_SIZE = 6
-
-# how much the player owes at one side of the contract. small enough
-# that early-game inventories can satisfy at least the smaller ones.
-QTY_RANGE = (5, 30)
-
-# margin multiplier applied to spot when sizing the receive_qty (or the
-# coin demand for inverse contracts). 1.0 = at-spot, >1.0 favours player
-# on resource-out / counterparty on resource-in.
-MARGIN_RANGE = (1.0, 1.3)
-
-# collateral = COLLATERAL_RATIO * value-of-what-player-is-providing,
-# at the contract's locked rate. losing collateral on failure costs the
-# player more than just walking away from spot.
-COLLATERAL_RATIO = 1.5
-
-# fraction of generated contracts that are "deliver resource, receive
-# coin" (the natural game-loop direction). remainder are coin->resource.
-RESOURCE_OUT_PROB = 0.7
+# contract/economy tunables (data/balance.json): board capacity, how much the
+# player owes per contract (QTY_RANGE), the spot margin band (MARGIN_RANGE),
+# the collateral multiple, and the share of resource-out vs coin-out contracts.
+from balance import (
+    BOARD_SIZE, QTY_RANGE, MARGIN_RANGE, COLLATERAL_RATIO, RESOURCE_OUT_PROB,
+)
 
 
 def generate_contract(spot_market) -> dict:

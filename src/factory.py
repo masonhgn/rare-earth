@@ -15,6 +15,7 @@
 
 import pygame as pg
 
+from config import FACTORY_UI_FILE
 from item import get_item_icon, load_item, load_recipe
 from resources import load_image
 from ui import SlotGrid
@@ -24,7 +25,7 @@ import slots as slot_ops
 
 # panel art is 1254x1254. scaled down to fit on screen.
 PANEL_SIZE = 600
-PANEL_FILE = 'src/data/sprites/ui/factory_interface.png'
+PANEL_FILE = FACTORY_UI_FILE
 
 # header rect inside the rendered panel — where we draw the active recipe
 # icon, name, and progress bar. measured from the source art header band.

@@ -27,17 +27,10 @@ from world import world_to_tile
 import movement
 
 
-# how often a chasing mob recomputes its route to the (moving) player.
-# re-pathing every frame is wasteful and jittery; ~2.5x/sec reads as smooth
-# pursuit and stays cheap on the 60x60 grid even with several mobs.
-CHASE_REPATH_SEC = 0.4
-
-# how far (in tiles) a wandering mob looks when picking its next destination.
-WANDER_TILE_RADIUS = 6
-
-# how long a mob stands still between wander legs (seconds, randomized).
-# higher = loiters more / strolls less. tune to taste.
-WANDER_PAUSE_RANGE = (1.5, 4.0)
+# mob movement tunables (data/balance.json): how often a chaser re-paths to the
+# moving player, how far a wanderer looks for its next spot, and how long it
+# loiters between legs.
+from balance import CHASE_REPATH_SEC, WANDER_TILE_RADIUS, WANDER_PAUSE_RANGE
 
 
 def _nearest_player(players, x: float, y: float):

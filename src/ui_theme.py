@@ -13,7 +13,7 @@ import os
 
 import pygame as pg
 
-from config import DATA_DIR
+from config import DATA_DIR, PANEL_SKIN_FILE
 
 # cwd-relative like every other asset (config.DATA_DIR == 'src/data'), so the
 # font resolves the same way under a frozen build as the rest of the data tree.
@@ -44,9 +44,9 @@ def get_mono_font(size: int) -> pg.font.Font:
     return font
 
 
-# 9-slice panel art used by every modal. scale=0.5 in NineSliceSkin gets
-# the rails to a non-bulky thickness on a 1280x720 viewport.
-PANEL_SKIN_FILE = 'src/data/sprites/ui/ui_tile.png'
+# 9-slice panel art used by every modal (PANEL_SKIN_FILE from config).
+# scale=0.5 in NineSliceSkin gets the rails to a non-bulky thickness on a
+# 1280x720 viewport.
 PANEL_SKIN_CORNER = 200
 PANEL_SKIN_SCALE = 0.5
 

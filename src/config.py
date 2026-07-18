@@ -16,8 +16,12 @@ SPRITES_FILE = f'{DATA_DIR}/sprites.json'
 # animation strips: semantic anim_id -> {file, frames, size, margin, spacing, fps}
 ANIMATIONS_FILE = f'{DATA_DIR}/animations.json'
 
-# inventory ui asset
-INVENTORY_UI_FILE = f'{DATA_DIR}/sprites/ui/inventory.png'
+# ui sprite assets (all under one dir so a relocation is a single edit)
+UI_DIR = f'{DATA_DIR}/sprites/ui'
+INVENTORY_UI_FILE = f'{UI_DIR}/inventory.png'
+FACTORY_UI_FILE = f'{UI_DIR}/factory_interface.png'
+PANEL_SKIN_FILE = f'{UI_DIR}/ui_tile.png'
+TABS_DIR = f'{UI_DIR}/tabs'   # right-edge hud tab icons (<name>.png)
 
 # runtime settings json (persisted across launches). from source this stays in
 # src/data; in a frozen build it must go to a writable spot next to the exe,
@@ -82,3 +86,7 @@ CULLING_MARGIN = 96
 # day clock: real seconds per in-game day. short value (120) for dev so
 # rollover triggers are testable without waiting hours.
 DAY_LENGTH_SEC = 120
+
+# how long a dead player is frozen (hp 0, showing YOU DIED) before respawn.
+# shared by single-player (game.py) and the server so the two can't drift.
+DEATH_SCREEN_SEC = 2.0

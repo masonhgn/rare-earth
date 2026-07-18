@@ -22,7 +22,7 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 import pygame as pg
 
-from config import PLAYER_SPAWN, PLAYER_ATTACK_RANGE, TILE_LENGTH
+from config import PLAYER_SPAWN, PLAYER_ATTACK_RANGE, TILE_LENGTH, DEATH_SCREEN_SEC
 from simcore import SimCore
 from entity import Entity
 from prototype import load_prototype
@@ -39,11 +39,13 @@ import player_ops
 import skills
 import crop as crop_ops
 
-TICK_HZ = 20
-PLAYER_ATTACK_CD = 0.4      # seconds between a player's melee swings
-DEATH_SCREEN_SEC = 2.0      # dead players freeze (hp 0) this long before respawn
-SAVE_INTERVAL = 60.0        # seconds between shared-world autosaves
-MAX_WRITE_BUFFER = 1 << 20  # drop a client whose unsent send buffer exceeds this (1 MB)
+# server runtime knobs — env-overridable (like HOST/PORT/MAX_PLAYERS) so ops can
+# retune a deployment without editing source. DEATH_SCREEN_SEC is shared game
+# balance, so it comes from config (single source with single-player).
+TICK_HZ = int(os.environ.get('TICK_HZ', '20'))
+PLAYER_ATTACK_CD = float(os.environ.get('PLAYER_ATTACK_CD', '0.4'))   # sec between melee swings
+SAVE_INTERVAL = float(os.environ.get('SAVE_INTERVAL', '60'))          # sec between autosaves
+MAX_WRITE_BUFFER = int(os.environ.get('MAX_WRITE_BUFFER', str(1 << 20)))  # drop a client past this unsent (1 MB)
 
 
 # --- intent input validation (clients are untrusted; reject malformed values
