@@ -128,6 +128,67 @@ def test_client_joins_and_receives_snapshots():
         s.close()
 
 
+def test_socket_transport_connect_send_poll():
+    # the client-side Transport seam driven against a real server: connect()
+    # must return the join payload, poll() must yield snapshots (carrying the
+    # events channel), and send() must reach the server without raising.
+    import time
+    from transport import SocketTransport
+
+    srv = _NetServer(dim=60)
+    t = SocketTransport('127.0.0.1', srv.port)
+    try:
+        join = t.connect()
+        assert set(join) == {'player_id', 'world', 'map_grid', 'overlay_grid'}
+        assert len(join['map_grid']) == 60 and len(join['map_grid'][0]) == 60
+        assert t.alive()
+
+        # an intent must serialize + reach the server without error.
+        t.send({'type': 'move', 'dx': 1, 'dy': 0})
+
+        # poll a few times; snapshots should accumulate and carry an events key.
+        snaps = []
+        for _ in range(40):
+            for msg in t.poll():
+                if msg.get('type') == 'snapshot':
+                    snaps.append(msg)
+            if len(snaps) >= 5:
+                break
+            time.sleep(0.02)
+        assert len(snaps) >= 5, f'only polled {len(snaps)} snapshots'
+        assert all('events' in s for s in snaps)
+    finally:
+        t.close()
+    assert not t.alive()
+
+
+def test_client_pumps_frames_against_a_live_server():
+    # the whole refactored Client loop, headless (SDL dummy driver from conftest):
+    # build from the join payload, then step real frames — input->intents, inbound
+    # apply, predict/interp, render — and confirm it stays alive with a synced
+    # local player. exercises the Phase-2 client-loop seam end to end.
+    import time
+    from transport import SocketTransport
+    from client import Client
+
+    srv = _NetServer(dim=60)
+    transport = SocketTransport('127.0.0.1', srv.port)
+    c = Client(transport, transport.connect())
+    try:
+        # send a movement intent, then pump frames so snapshots arrive + apply.
+        c.transport.send({'type': 'move', 'dx': 1, 'dy': 0})
+        alive = True
+        for _ in range(30):
+            alive = c.step_frame()
+            if not alive:
+                break
+            time.sleep(0.005)
+        assert alive, 'client stopped running unexpectedly'
+        assert c.world.entities.get(c.local_id) is not None, 'local player never synced'
+    finally:
+        transport.close()
+
+
 def test_streamed_chunks_reassemble_to_the_server_map():
     # every chunk frame must be well under the message cap, and reassembling
     # them must reproduce the server's actual grids exactly.

@@ -60,9 +60,9 @@ def move_axis(world, entity, dx: float, dy: float) -> tuple[float, float]:
 def input_delta(entity, dx: float, dy: float, dt: float) -> tuple[float, float]:
     # convert a raw input direction (each axis in {-1, 0, 1}) into the pixel
     # (dx, dy) to move this frame: normalize diagonals via DIAG, then scale by
-    # the entity's speed. the single source of truth for the three movement
-    # paths (input_handler.poll_movement, server tick, client prediction) so
-    # they can't drift.
+    # the entity's speed. the single source of truth for the movement paths
+    # (the authoritative host tick and the client's local prediction) so they
+    # can't drift.
     if dx and dy:
         dx *= DIAG
         dy *= DIAG
@@ -195,6 +195,12 @@ def update_player_animation(player, dx: float, dy: float) -> None:
     # preference and avoids flicker when the path follower bounces between
     # near-equal components.
     if player.anim is None:
+        return
+    # while a one-shot swing is mid-play, leave facing/state alone so the swing
+    # isn't clobbered; looping movement (idle/walk) resumes on its own the frame
+    # after it finishes. centralized here so every caller — sp, the net client's
+    # per-frame interpolation, and mobs — respects it.
+    if player.anim.oneshot and not player.anim.finished:
         return
     # below the 0.5 walk threshold on both axes => idle. exact-zero isn't enough:
     # the net client eases the player toward the server position asymptotically,

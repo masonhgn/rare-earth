@@ -120,9 +120,11 @@ class MobSystem:
         attack_range = spec.get('attack_range', 0)
         if attack_range <= 0 or dist > attack_range or ms['attack_cd'] > 0.0:
             return
-        if mob.anim is not None:  # visual only; damage/knockback don't need it
-            facing = 'left' if pcx < mcx else 'right'
-            mob.anim.play_once('attacking_' + facing, now_ms)
+        # the swing is presentation, emitted as an event so it plays in single-
+        # player and rides the snapshot to every client; damage/knockback below
+        # are authoritative and run regardless.
+        facing = 'left' if pcx < mcx else 'right'
+        self.world.emit('attack', id=mob.id, facing=facing)
         movement.knock_back(mob, player)
         self.combat.hit(mob, player, now_ms)
         ms['attack_cd'] = spec.get('attack_period', 1.0) * random.uniform(0.8, 1.2)

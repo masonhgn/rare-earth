@@ -1,8 +1,8 @@
 
 # rebindable controls: resolve the action->key-name map in settings.json into
 # the integer pygame key codes the input code compares against. ONE shared
-# resolver used by both the single-player input (input_handler) and the net
-# client, so the two control paths can't drift.
+# resolver used by the Client (both single-player and multiplayer) and the
+# authoritative host, so the control mapping can't drift.
 #
 # settings.json stores key NAMES ('w', 'tab', 'escape', '`') because they're
 # human-editable; load_keybinds() turns them into codes and back-fills any

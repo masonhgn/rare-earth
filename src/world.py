@@ -82,7 +82,18 @@ class World:
         # appends here; the HUD drains it each frame. server ignores it.
         self.pending_level_ups: list[tuple[str, int]] = []
 
+        # transient queue of one-shot presentation events (attack swings, hits)
+        # emitted by the authoritative sim and drained each tick/frame. single-
+        # player applies them locally; the server serializes them into the
+        # snapshot so every client renders the same effect (see effects.py).
+        self.events: list[dict] = []
+
         self.spawn_player()
+
+    def emit(self, kind: str, **data) -> None:
+        # queue a one-shot presentation event. plain dict so it serializes onto
+        # the wire unchanged; consumers dispatch by 'kind' (see effects.apply).
+        self.events.append({'kind': kind, **data})
 
     # --- map ---
 

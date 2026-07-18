@@ -128,7 +128,7 @@ class FactoryPanel:
         self.panel_image = pg.transform.smoothscale(raw, (PANEL_SIZE, PANEL_SIZE))
         self.font = get_font(22)
         self.font_small = get_font(16)
-        # set in open_for() so input_handler can collidepoint before render
+        # set in open_for() so the click handler can collidepoint before render
         self.origin: tuple[int, int] = (0, 0)
         self.rect = pg.Rect(0, 0, PANEL_SIZE, PANEL_SIZE)
         # slot wells are baked into the panel art (draw_cells=False); the

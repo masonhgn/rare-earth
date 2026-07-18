@@ -53,7 +53,11 @@ class CombatSystem:
         target.health = max(0, target.health - amount)
         target.last_damage_ms = now_ms
         hb = target.hitbox_rect()
-        self.damage_numbers.append(DamageNumber(hb.centerx, hb.top, amount, now_ms))
+        # the floating number + hit dust are presentation, so they ride the
+        # event stream rather than being spawned here directly — that way the
+        # net client (which never runs this sim) still shows them. 'y' anchors
+        # the number, 'fy' the feet for dust.
+        self.world.emit('hit', x=hb.centerx, y=hb.top, fy=hb.bottom, amount=amount)
         died = target.health <= 0 and not target.is_player
         self._award_combat_xp(attacker, target, amount, died)
         if died:
@@ -92,6 +96,11 @@ class CombatSystem:
         for item_id, qty in roll_drops(entity.prototype.drops):
             self.world.spawn_dropped_item(item_id, qty, pos)
 
+    def spawn_number(self, world_x: float, world_y: float, amount: int, now_ms: int) -> None:
+        # add a floating "-N" at a world point. driven by the 'hit' event so both
+        # single-player and the net client route damage numbers through one path.
+        self.damage_numbers.append(DamageNumber(world_x, world_y, amount, now_ms))
+
     def tick(self, now_ms: int) -> None:
         self.damage_numbers = [
             d for d in self.damage_numbers if now_ms - d.born_ms < FLOAT_LIFETIME_MS
@@ -101,6 +110,11 @@ class CombatSystem:
 
     def render_world(self, surface: pg.Surface, cam, culling, now_ms: int) -> None:
         self._render_health_bars(surface, cam, culling, now_ms)
+        self._render_damage_numbers(surface, cam, now_ms)
+
+    def render_numbers(self, surface: pg.Surface, cam, now_ms: int) -> None:
+        # damage numbers only (no over-head health bars). the net client draws
+        # its own bars but reuses this for the shared number rendering.
         self._render_damage_numbers(surface, cam, now_ms)
 
     def _render_health_bars(self, surface, cam, culling, now_ms: int) -> None:

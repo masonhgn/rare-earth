@@ -21,6 +21,7 @@ from factory import FactorySystem
 from mob import MobSystem
 from spot_market import SpotMarket
 from contracts import ContractSystem
+from crop import CropSystem
 from clock import DayClock
 import movement
 import worldgen
@@ -37,14 +38,18 @@ class SimCore:
         self.factory_system = FactorySystem(self.world)
         self.mob_system = MobSystem(self.world, self.break_system, self.combat)
         self.contract_system = ContractSystem(self.world)
+        # crop growth: one stage per in-game day. previously only single-player
+        # advanced crops; hosting it here grows them for every client too.
+        self.crop_system = CropSystem(self.world)
         self.day_clock = DayClock()
         self.day_clock.on_rollover = self._on_day_rollover
         if seed_default:
             self.seed()
 
     def _on_day_rollover(self, new_day: int) -> None:
-        # settle due contracts.
+        # settle due contracts + grow every planted crop one stage.
         self.contract_system.settle_day_rollover(new_day)
+        self.crop_system.advance_day()
 
     def seed(self) -> None:
         worldgen.seed_world(self.world)

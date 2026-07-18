@@ -1,16 +1,14 @@
 
 # authoritative TCP game server.
 #
-# runs the headless SimCore, accepts client connections (one player entity per
-# connection), applies their movement intents, and broadcasts world snapshots
-# every tick. start with:   python src/server.py
-#
-# this is the connect-locally milestone slice: shared world + movement. break /
-# attack / economy intents, state deltas, interest management, prediction, and
-# persistence all come in later phases. for now clients render the full snapshot.
+# thin networking wrapper around WorldHost (world_host.py): it accepts client
+# connections (one player entity per connection), streams each the join snapshot
+# + map, forwards their validated intents into the host, and broadcasts the
+# host's per-tick snapshot + per-player messages. all the sim + command logic
+# lives in WorldHost, shared with the single-player listen server. start with:
+#   python src/server.py
 
 import asyncio
-import math
 import os
 import sys
 import traceback
@@ -22,74 +20,23 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 import pygame as pg
 
-from config import PLAYER_SPAWN, PLAYER_ATTACK_RANGE, TILE_LENGTH, DEATH_SCREEN_SEC
 from simcore import SimCore
-from entity import Entity
-from prototype import load_prototype
-from world import tile_center, world_to_tile, in_reach
-from pathfinding import find_path
-from item import roll_drops, load_item
-from contracts import accept_contract, cancel_contract, ensure_board
-import interaction
-import movement
+from world_host import WorldHost
 import netproto
 import save_state
-import slots as slot_ops
-import player_ops
-import skills
-import crop as crop_ops
 
 # server runtime knobs — env-overridable (like HOST/PORT/MAX_PLAYERS) so ops can
-# retune a deployment without editing source. DEATH_SCREEN_SEC is shared game
-# balance, so it comes from config (single source with single-player).
+# retune a deployment without editing source. (gameplay balance like the attack
+# cooldown lives in WorldHost, shared with single-player.)
 TICK_HZ = int(os.environ.get('TICK_HZ', '20'))
-PLAYER_ATTACK_CD = float(os.environ.get('PLAYER_ATTACK_CD', '0.4'))   # sec between melee swings
 SAVE_INTERVAL = float(os.environ.get('SAVE_INTERVAL', '60'))          # sec between autosaves
 MAX_WRITE_BUFFER = int(os.environ.get('MAX_WRITE_BUFFER', str(1 << 20)))  # drop a client past this unsent (1 MB)
-
-
-# --- intent input validation (clients are untrusted; reject malformed values
-# before they reach the unguarded sim path) ---
-
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
-def _finite(v):
-    # a finite float, or None if v isn't a real (non-NaN/Inf) number.
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
-    f = float(v)
-    return f if math.isfinite(f) else None
-
-
-def _axis(v) -> float:
-    # movement axis coerced to [-1, 1] — rejects NaN/Inf and speed/teleport hacks.
-    f = _finite(v)
-    return 0.0 if f is None else max(-1.0, min(1.0, f))
-
-
-class Connection:
-    def __init__(self, writer, player_id: str) -> None:
-        self.writer = writer
-        self.player_id = player_id
-        self.move_dir = (0.0, 0.0)   # latest held WASD direction from this client
-        self.pending_walk = None     # (wx, wy) click-to-walk destination (one-shot)
-        self.pending_attack = None   # entity id this client wants to hit (one-shot)
-        self.pending_break = None    # (tx, ty) tile this client wants to break (one-shot)
-        self.pending_place = None    # (tx, ty) tile to place the held item on (one-shot)
-        self.pending_trade = None    # (side, item_id, qty) spot trade request (one-shot)
-        self.actions = []              # ordered held-cursor actions this tick (inv/machine/drop)
-        self.open_machine = None       # entity id of the machine this client has open
-        self.attack_cd = 0.0         # seconds until this player may swing again
-        self.dead_until = None       # sim-elapsed time to respawn at, or None if alive
 
 
 class GameServer:
     def __init__(self) -> None:
         # pygame is initialized (no display) only because the sim systems still
-        # read pg.time.get_ticks() for break/factory/combat timing. (Phase 4
-        # replaces that with the fixed-step sim clock and drops this.)
+        # read pg.time.get_ticks() for break/factory/combat timing.
         pg.init()
         # load the persisted shared world if one exists, else seed a fresh one.
         self.sim = SimCore(seed_default=False)
@@ -101,376 +48,63 @@ class GameServer:
         # the default single-player 'player' from World() isn't used here —
         # players join per connection with unique ids.
         self.sim.world.remove_entity('player')
-        self.conns: dict[int, Connection] = {}
-        self._next_id = 0
-        self._elapsed = 0.0   # accumulated sim seconds (drives death/respawn timing)
-        self._overlay_changes: list = []   # (tx, ty) ore tiles cleared since last broadcast
+        self.host = WorldHost(self.sim)
         self._save_accum = 0.0   # seconds since the last autosave
         self.max_players = int(os.environ.get('MAX_PLAYERS', '16'))
+
+    @property
+    def conns(self) -> dict:
+        # the broadcast set lives on the host; exposed here for the join-ordering
+        # invariant test and any ops introspection.
+        return self.host.conns
 
     # --- per-connection lifecycle ---
 
     async def handle_client(self, reader, writer) -> None:
         # refuse new players past the cap — each connection is a player entity in
         # the world, so an unbounded flood would exhaust the sim.
-        if len(self.conns) >= self.max_players:
+        if len(self.host.conns) >= self.max_players:
             writer.close()
             return
-        pid = f'player_{self._next_id}'
-        self._next_id += 1
-        self.sim.world.add_entity(
-            Entity(load_prototype('player'), PLAYER_SPAWN, entity_id=pid)
-        )
-        # give the new player their own contract board (per-player ownership).
-        ensure_board(self.sim.world.entities[pid].exchange_state, self.sim.spot_market)
-        conn = Connection(writer, pid)
+        conn = self.host.create_player(writer)
+        pid = conn.player_id
         peer = writer.get_extra_info('peername')
         try:
-            # send the join snapshot and flush it BEFORE joining the broadcast
-            # set. the welcome is the whole map — megabytes on a big world — and
-            # takes many ticks to reach a remote client over a real link. if the
-            # connection were already in self.conns, the tick loop's per-client
-            # write-buffer guard (_send_to) would see the still-draining welcome
-            # exceed MAX_WRITE_BUFFER and drop the player mid-join. only after the
-            # welcome has flushed do we start streaming per-tick snapshots.
+            # send the join snapshot and flush it BEFORE registering the
+            # connection in the broadcast set. the welcome + streamed map are
+            # megabytes on a big world and take many ticks to reach a remote
+            # client; if the connection were already registered, the tick loop's
+            # per-client write-buffer guard would see the still-draining welcome
+            # exceed MAX_WRITE_BUFFER and drop the player mid-join. only once the
+            # join has flushed do we start streaming per-tick snapshots.
             writer.write(netproto.encode({
                 'type': 'welcome',
                 'player_id': pid,
                 'world': netproto.world_join(self.sim.world, self.sim.spot_market, self.sim.day_clock),
             }))
             await writer.drain()
-            # stream the map as chunks, draining between each, still BEFORE
-            # joining the broadcast set — so no single frame nears MAX_MSG_BYTES
-            # and the tick loop's buffer guard can't fire on the in-flight map.
             for frame in netproto.map_chunks(self.sim.world):
                 writer.write(frame)
                 await writer.drain()
-            self.conns[id(writer)] = conn
-            print(f'[server] {peer} joined as {pid} ({len(self.conns)} online)')
+            self.host.register(id(writer), conn)
+            print(f'[server] {peer} joined as {pid} ({len(self.host.conns)} online)')
             while True:
                 msg = await netproto.read_msg(reader)
                 if msg is None:
                     break
-                mtype = msg.get('type')
-                if mtype == 'move':
-                    conn.move_dir = (_axis(msg.get('dx')), _axis(msg.get('dy')))
-                elif mtype == 'walk':
-                    x, y = _finite(msg.get('x')), _finite(msg.get('y'))
-                    if x is not None and y is not None:
-                        conn.pending_walk = (x, y)
-                elif mtype == 'attack':
-                    tid = msg.get('target')
-                    if isinstance(tid, str):
-                        conn.pending_attack = tid
-                elif mtype == 'break':
-                    t = msg.get('tile')
-                    if isinstance(t, list) and len(t) == 2 and _is_int(t[0]) and _is_int(t[1]):
-                        conn.pending_break = (int(t[0]), int(t[1]))
-                elif mtype == 'place':
-                    t = msg.get('tile')
-                    if isinstance(t, list) and len(t) == 2 and _is_int(t[0]) and _is_int(t[1]):
-                        conn.pending_place = (int(t[0]), int(t[1]))
-                elif mtype == 'trade':
-                    side, item, qty = msg.get('side'), msg.get('item'), msg.get('qty')
-                    if side in ('sell', 'buy') and isinstance(item, str) and _is_int(qty):
-                        conn.pending_trade = (side, item, int(qty))
-                elif mtype == 'inv_click':
-                    if _is_int(msg.get('slot')):
-                        conn.actions.append(('inv', int(msg['slot'])))
-                elif mtype == 'drop':
-                    x, y = _finite(msg.get('x')), _finite(msg.get('y'))
-                    if x is not None and y is not None:
-                        conn.actions.append(('drop', x, y))
-                elif mtype == 'accept':
-                    if _is_int(msg.get('index')):
-                        conn.actions.append(('accept', int(msg['index'])))
-                elif mtype == 'cancel':
-                    if _is_int(msg.get('index')):
-                        conn.actions.append(('cancel', int(msg['index'])))
-                elif mtype == 'dropbox':
-                    if _is_int(msg.get('slot')):
-                        conn.actions.append(('dropbox', int(msg['slot'])))
-                elif mtype == 'machine_click':
-                    kind = msg.get('kind')
-                    if kind in ('input', 'output') and _is_int(msg.get('slot')):
-                        conn.actions.append(('machine', kind, int(msg['slot'])))
-                elif mtype == 'open_machine':
-                    mid = msg.get('id')
-                    if isinstance(mid, str):
-                        conn.open_machine = mid
-                elif mtype == 'close_machine':
-                    conn.open_machine = None
+                self.host.apply_intent(conn, msg)
         finally:
-            was_registered = self.conns.pop(id(writer), None) is not None
-            p = self.sim.world.entities.get(pid)
-            if p is not None:
-                self._drop_player_goods(p, include_dropbox=True)   # spill goods + drop box so a disconnect doesn't sink them
-            self.sim.world.remove_entity(pid)
+            was_registered = self.host.remove_player(id(writer), conn)
             try:
                 writer.close()
             except Exception:
                 pass
-            # only a client that actually joined (welcome flushed, added to
-            # self.conns) logs a "left"; one that dropped mid-welcome never did.
+            # only a client that actually joined (welcome flushed, registered)
+            # logs a "left"; one that dropped mid-welcome never did.
             if was_registered:
-                print(f'[server] {pid} left ({len(self.conns)} online)')
+                print(f'[server] {pid} left ({len(self.host.conns)} online)')
 
-    # --- authoritative tick ---
-
-    def _apply_move_intents(self, dt: float) -> None:
-        for conn in self.conns.values():
-            if conn.dead_until is not None:
-                conn.pending_walk = None
-                continue   # frozen while dead
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            # click-to-walk: pathfind to the requested point. WASD (below) still
-            # preempts by clearing the path, so held keys always win.
-            if conn.pending_walk is not None:
-                gx, gy = conn.pending_walk
-                conn.pending_walk = None
-                goal = self.sim.world.nearest_walkable(*world_to_tile((gx, gy)))
-                p.path = (find_path(self.sim.world, world_to_tile(p.center), goal) or []) \
-                    if goal is not None else []
-            dx, dy = conn.move_dir
-            if dx or dy:
-                p.path = []
-                mx, my = movement.input_delta(p, dx, dy, dt)
-                movement.move_axis(self.sim.world, p, mx, my)
-            elif p.path:
-                movement.follow_path(p, self.sim.world, dt)
-            movement.apply_knockback(self.sim.world, p, dt)
-            movement.clamp_to_bounds(self.sim.world, p)
-
-    def _process_attacks(self) -> None:
-        # apply each client's pending attack: validate target + range + cooldown,
-        # then knock back + damage. random damage roll happens server-side.
-        for conn in self.conns.values():
-            target_id = conn.pending_attack
-            conn.pending_attack = None
-            if target_id is None or conn.dead_until is not None or conn.attack_cd > 0.0:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            target = self.sim.world.entities.get(target_id)
-            if (p is None or target is None or target.health is None
-                    or 'mob' not in target.components):
-                continue   # PvE only: targets must be mobs
-            (pcx, pcy), (tcx, tcy) = p.center, target.center
-            if (pcx - tcx) ** 2 + (pcy - tcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2:
-                movement.knock_back(p, target)
-                self.sim.combat.hit(p, target, pg.time.get_ticks())
-                conn.attack_cd = PLAYER_ATTACK_CD
-
-    def _process_breaks(self) -> None:
-        # instant break (no progress bar over the net for v1): validate the
-        # acting player's reach, then clear the ore / break the entity and spawn
-        # its drops. records cleared overlay tiles for the snapshot delta.
-        for conn in self.conns.values():
-            tile = conn.pending_break
-            conn.pending_break = None
-            if tile is None or conn.dead_until is not None:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            tx, ty = tile
-            if not in_reach(p, tx, ty):
-                continue   # out of reach
-            self._break_tile(tx, ty, p)
-
-    def _break_tile(self, tx: int, ty: int, p) -> None:
-        # `p` is the acting player: enforces the Mining-level gate and earns them
-        # the mining/farming xp for what they break (mirrors BreakSystem in SP).
-        w = self.sim.world
-        found = interaction.breakable_at(w, (tx, ty))
-        if found is None:
-            return
-        proto, entity_id = found
-        if not interaction.can_mine(p, proto):
-            return   # gated: needs a higher Mining level
-        if entity_id is not None:
-            ent = w.entities.get(entity_id)
-            crop = ent.components.get('crop') if ent is not None else None
-            farming_level = (skills.level_of(p.skills, 'farming')
-                             if p is not None and p.skills is not None else 1)
-            for item_id, qty in w.break_entity(entity_id, farming_level=farming_level):
-                w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
-            player_ops.grant_xp(w, p, 'mining', getattr(proto, 'mining_xp', 0.0) or 0.0)
-            if crop is not None and proto.crop is not None \
-                    and crop_ops.is_mature(proto.crop, crop['stage']):
-                player_ops.grant_xp(w, p, 'farming', getattr(proto, 'farming_xp', 0.0) or 0.0)
-            return
-        # overlay ore: clear the tile, record the delta for the snapshot, drop.
-        w.overlay_grid[ty][tx] = None
-        self._overlay_changes.append((tx, ty))
-        for item_id, qty in roll_drops(proto.drops):
-            w.spawn_dropped_item(item_id, qty, tile_center((tx, ty)))
-        player_ops.grant_xp(w, p, 'mining', getattr(proto, 'mining_xp', 0.0) or 0.0)
-
-    def _process_places(self) -> None:
-        # build-mode placement: validate reach + emptiness + that the acting
-        # player's held item is placeable, then spawn the entity and consume one
-        # unit from held. the new entity rides out on the next snapshot; the
-        # decremented held rides back on the per-player inv message. the
-        # single-threaded tick serializes this, so two players racing for the
-        # same tile can't double-place (the loser's add_entity raises).
-        for conn in self.conns.values():
-            tile = conn.pending_place
-            conn.pending_place = None
-            if tile is None or conn.dead_until is not None:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None or p.held_item is None:
-                continue
-            proto = load_item(p.held_item['item_id'])
-            if proto.places is None:
-                continue
-            tx, ty = tile
-            if not self._placeable_here(p, tx, ty):
-                continue
-            entity = Entity(load_prototype(proto.places), (tx * TILE_LENGTH, ty * TILE_LENGTH))
-            try:
-                self.sim.world.add_entity(entity)
-            except ValueError:
-                continue   # lost the tile race this tick — keep the held stack
-            held = p.held_item
-            if held['quantity'] <= 1:
-                p.held_item = None
-            else:
-                p.held_item = {**held, 'quantity': held['quantity'] - 1}
-
-    def _placeable_here(self, p, tx: int, ty: int) -> bool:
-        return interaction.can_place(self.sim.world, p, (tx, ty), p.held_item)
-
-    def _process_player_actions(self) -> None:
-        # ordered held-cursor actions (inventory drag, machine in/out, drop) in
-        # exact click order, so cross-panel moves work regardless of panel.
-        for conn in self.conns.values():
-            actions = conn.actions
-            conn.actions = []
-            if conn.dead_until is not None:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            for action in actions:
-                if action[0] == 'inv':
-                    p.held_item = slot_ops.click(p.inventory.slots, action[1], p.held_item)
-                elif action[0] == 'drop':
-                    self._drop_held(p, action[1], action[2])
-                elif action[0] == 'machine':
-                    ent = (self.sim.world.entities.get(conn.open_machine)
-                           if conn.open_machine else None)
-                    if ent is None or 'machine' not in ent.components:
-                        continue
-                    ms = ent.components['machine']
-                    if action[1] == 'output':
-                        p.held_item = slot_ops.click(ms['output_slots'], action[2], p.held_item, take_only=True)
-                    else:
-                        p.held_item = slot_ops.click(ms['input_slots'], action[2], p.held_item)
-                elif action[0] == 'accept':
-                    accept_contract(p.exchange_state, action[1], p.inventory, self.sim.day_clock.day)
-                elif action[0] == 'cancel':
-                    cancel_contract(p.exchange_state, action[1], p.inventory)
-                elif action[0] == 'dropbox':
-                    p.held_item = slot_ops.click(p.exchange_state['drop_box'], action[1], p.held_item)
-
-    def _drop_held(self, p, x: float, y: float) -> None:
-        if p.held_item is None:
-            return
-        tx, ty = world_to_tile((x, y))
-        if not in_reach(p, tx, ty):
-            return   # out of reach: keep holding it
-        self.sim.world.spawn_dropped_item(p.held_item['item_id'], p.held_item['quantity'], (x, y))
-        p.held_item = None
-
-    def _machine_msg(self, machine_id):
-        # per-viewer machine state: slots + active recipe + accumulated craft
-        # time (elapsed_ms). the client advances it locally between updates so
-        # the bar stays smooth, and each message re-syncs it to authoritative.
-        ent = self.sim.world.entities.get(machine_id)
-        if ent is None or 'machine' not in ent.components:
-            return None
-        ms = ent.components['machine']
-        recipe = ms['current_recipe']
-        elapsed = ms['elapsed_ms'] if recipe else 0
-        return netproto.encode({
-            'type': 'machine', 'id': machine_id,
-            'input': ms['input_slots'], 'output': ms['output_slots'],
-            'recipe': recipe, 'elapsed': elapsed,
-        })
-
-    def _process_trades(self) -> None:
-        # spot buy/sell against the shared market, validated + applied on the
-        # player's authoritative inventory (the change rides back on the next
-        # per-player inv message). market price-impact is still deferred.
-        for conn in self.conns.values():
-            trade = conn.pending_trade
-            conn.pending_trade = None
-            if trade is None or conn.dead_until is not None:
-                continue
-            side, item_id, qty = trade
-            if not item_id or qty <= 0:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            if side == 'sell':
-                self.sim.spot_market.sell(p.inventory, item_id, qty)
-            elif side == 'buy':
-                self.sim.spot_market.buy(p.inventory, item_id, qty)
-
-    def _auto_pickup(self) -> None:
-        # each living player sweeps up drops overlapping their hitbox into their
-        # own inventory (first player to reach a drop wins it).
-        for conn in self.conns.values():
-            if conn.dead_until is not None:
-                continue
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            for d in self.sim.world.collect_dropped_in_rect(p.hitbox_rect()):
-                leftover = p.inventory.add_item(d.item_id, d.quantity)
-                if leftover > 0:
-                    self.sim.world.spawn_dropped_item(d.item_id, leftover, d.world_pos)
-
-    def _handle_deaths(self) -> None:
-        # paced death: when a player hits 0 hp, freeze them (hp stays 0, intents
-        # ignored) for DEATH_SCREEN_SEC so the client can show YOU DIED, then
-        # drop their loot + recenter at full health.
-        for conn in self.conns.values():
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is None:
-                continue
-            if conn.dead_until is None:
-                if p.health is not None and p.health <= 0:
-                    conn.dead_until = self._elapsed + DEATH_SCREEN_SEC
-            elif self._elapsed >= conn.dead_until:
-                self._respawn(p)
-                conn.dead_until = None
-
-    def _drop_player_goods(self, p, include_dropbox: bool = False) -> None:
-        # spill a player's inventory + held cursor onto the ground at their feet.
-        # on disconnect we also spill their drop box (include_dropbox=True) so
-        # staged deposits aren't silently lost when the per-connection player is
-        # removed; on death we keep the drop box (it's a bank-like staging area).
-        at = p.center
-        player_ops.spill_inventory_at_feet(self.sim.world, p)
-        if p.held_item is not None:
-            self.sim.world.spawn_dropped_item(p.held_item['item_id'], p.held_item['quantity'], at)
-        if include_dropbox and p.exchange_state is not None:
-            for slot in p.exchange_state['drop_box']:
-                if slot is not None:
-                    self.sim.world.spawn_dropped_item(slot['item_id'], slot['quantity'], at)
-
-    def _respawn(self, player) -> None:
-        self._drop_player_goods(player)
-        player.inventory.slots = [None] * len(player.inventory.slots)
-        player.held_item = None
-        player_ops.recenter_at_full_health(self.sim.world, player)
-        player.knockback_x = player.knockback_y = 0.0
-        player.path = []
+    # --- authoritative tick + broadcast ---
 
     async def _tick_loop(self) -> None:
         # one bad client packet must never take down the shared sim, so the whole
@@ -484,28 +118,9 @@ class GameServer:
             await asyncio.sleep(dt)
 
     def _tick(self, dt: float) -> None:
-        self._elapsed += dt
-        for conn in self.conns.values():
-            conn.attack_cd = max(0.0, conn.attack_cd - dt)
-        self._process_attacks()
-        self._process_breaks()
-        self._process_trades()
-        self._process_player_actions()
-        self._process_places()
-        self._apply_move_intents(dt)
-        self.sim.tick(dt)
-        self._auto_pickup()
-        self._handle_deaths()
-        snap = netproto.encode({
-            'type': 'snapshot',
-            'ents': netproto.entity_snapshot(self.sim.world),
-            'dropped': netproto.dropped_snapshot(self.sim.world),
-            'overlay': [list(t) for t in self._overlay_changes],   # cleared-tile deltas
-            'prices': dict(self.sim.spot_market.prices),
-            'day_elapsed': self.sim.day_clock.elapsed,   # client derives the day number
-        })
-        self._overlay_changes.clear()
-        for conn in list(self.conns.values()):
+        self.host.tick(dt)
+        snap = netproto.encode(self.host.snapshot_msg())
+        for conn in list(self.host.conns.values()):
             self._send_to(conn, snap)
         self._save_accum += dt
         if self._save_accum >= SAVE_INTERVAL:
@@ -522,19 +137,8 @@ class GameServer:
                 w.close()   # handle_client's reader unblocks and runs cleanup
                 return
             w.write(snap)   # shared world snapshot (not awaiting drain)
-            p = self.sim.world.entities.get(conn.player_id)
-            if p is not None:
-                # per-player inventory + held cursor (private to each client)
-                w.write(netproto.encode({'type': 'inv', 'slots': p.inventory.slots, 'held': p.held_item}))
-                # per-player forward-contract state (board / active / drop box)
-                w.write(netproto.encode({'type': 'exchange', 'state': p.exchange_state}))
-                # per-player skill xp (drives the character sheet + level-up toasts;
-                # max hp from the Health level rides the shared snapshot's 'mhp')
-                w.write(netproto.encode({'type': 'skills', 'skills': p.skills}))
-            if conn.open_machine is not None:
-                mm = self._machine_msg(conn.open_machine)
-                if mm is not None:
-                    w.write(mm)
+            for m in self.host.player_msgs(conn):   # per-player inv/exchange/skills/machine
+                w.write(netproto.encode(m))
         except (ConnectionError, OSError):
             pass   # client went away mid-send; its reader task runs cleanup
         except Exception:
@@ -551,18 +155,15 @@ class GameServer:
         # flow streams the whole world once at connect, so they must reconnect
         # to see it. runs synchronously between ticks (single-threaded asyncio),
         # so it can't race a tick mid-mutation.
-        for conn in list(self.conns.values()):
+        for conn in list(self.host.conns.values()):
             try:
                 conn.writer.close()
             except Exception:
                 pass
-        self.conns.clear()
         self.sim = SimCore(seed_default=False)
         self.sim.seed()
         self.sim.world.remove_entity('player')   # per-connection players only
-        self._next_id = 0
-        self._elapsed = 0.0
-        self._overlay_changes.clear()
+        self.host = WorldHost(self.sim)          # fresh host: clears conns/elapsed/deltas
         self._save_accum = 0.0
         try:
             os.remove(save_state.SERVER_SAVE_PATH)

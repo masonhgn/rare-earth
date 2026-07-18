@@ -1,8 +1,9 @@
 
 # entry point / launcher. shows the title screen, then runs the chosen mode in
-# the same window (single player = local Game; multiplayer = networked client).
+# the same window. both modes run the same Client loop: single-player over an
+# in-process LocalTransport (a listen server), multiplayer over a socket.
 #
-# the server is its own process:  python src/server.py
+# the dedicated multiplayer server is its own process:  python src/server.py
 
 import pygame as pg
 
@@ -38,8 +39,8 @@ def main() -> None:
                 if selection is None:
                     continue  # Back: return to the title screen
                 save_path, world_name = selection
-                from game import Game
-                if Game(save_path=save_path, world_name=world_name).start() == 'title':
+                from client import run_local
+                if run_local(save_path, world_name) == 'title':
                     continue
                 return  # Quit Game -> quit the launcher
             else:

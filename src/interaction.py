@@ -1,10 +1,10 @@
 
 # shared interaction detection + validation.
 #
-# pure helpers used by every path — single-player input (input_handler), the
-# break system, the net client, and the authoritative server — so "what's
-# breakable / placeable / openable here?" and "is this mob under the cursor?"
-# live in ONE place instead of drifting across copies.
+# pure helpers used by every path — the client's input handling, the break
+# system, and the authoritative host — so "what's breakable / placeable /
+# openable here?" and "is this mob under the cursor?" live in ONE place instead
+# of drifting across copies.
 #
 # everything takes `world` (and, where reach matters, an explicit `player`) as
 # a parameter and never calls world.get_player(): the fixed 'player' id only
