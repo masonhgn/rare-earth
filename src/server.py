@@ -12,6 +12,7 @@
 import asyncio
 import math
 import os
+import sys
 import traceback
 
 # run headless — cloud boxes have no display/audio. must be set before pygame
@@ -32,6 +33,7 @@ from contracts import accept_contract, cancel_contract, ensure_board
 import interaction
 import movement
 import netproto
+import save_state
 import slots as slot_ops
 import player_ops
 import skills
@@ -536,11 +538,73 @@ class GameServer:
         except Exception:
             traceback.print_exc()   # a real bug (serialization, etc.) — log, don't swallow
 
+    # --- admin console (stdin) ---
+
+    def _print_help(self) -> None:
+        print('[server] commands:  help | newworld | exit')
+
+    def _new_world(self) -> None:
+        # dev command: discard the current world (and its save) and generate a
+        # brand-new seeded one. connected clients are disconnected — the join
+        # flow streams the whole world once at connect, so they must reconnect
+        # to see it. runs synchronously between ticks (single-threaded asyncio),
+        # so it can't race a tick mid-mutation.
+        for conn in list(self.conns.values()):
+            try:
+                conn.writer.close()
+            except Exception:
+                pass
+        self.conns.clear()
+        self.sim = SimCore(seed_default=False)
+        self.sim.seed()
+        self.sim.world.remove_entity('player')   # per-connection players only
+        self._next_id = 0
+        self._elapsed = 0.0
+        self._overlay_changes.clear()
+        self._save_accum = 0.0
+        try:
+            os.remove(save_state.SERVER_SAVE_PATH)
+        except OSError:
+            pass
+        self.sim.save()   # persist the fresh world so a restart keeps it
+        print('[server] generated a new world; connected players were disconnected')
+
+    async def _console_loop(self) -> None:
+        # read admin commands from stdin without blocking the event loop (a
+        # blocking readline runs in the default thread executor). EOF (piped /
+        # no tty, e.g. a cloud box) just disables the console; the server runs on.
+        loop = asyncio.get_running_loop()
+        self._print_help()
+        while not self._shutdown.is_set():
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                return   # stdin closed: no interactive console, keep serving
+            cmd = line.strip().lower()
+            if cmd in ('exit', 'quit', 'stop'):
+                print('[server] shutting down')
+                self._shutdown.set()
+                return
+            elif cmd in ('newworld', 'regen', 'reset'):
+                self._new_world()
+            elif cmd in ('help', '?'):
+                self._print_help()
+            elif cmd:
+                print(f"[server] unknown command '{cmd}' (type 'help')")
+
     async def run(self, host: str = '127.0.0.1', port: int = 5555) -> None:
+        self._shutdown = asyncio.Event()
         srv = await asyncio.start_server(self.handle_client, host, port)
         print(f'[server] listening on {host}:{port}  (tick {TICK_HZ}Hz)')
         async with srv:
-            await asyncio.gather(srv.serve_forever(), self._tick_loop())
+            tasks = [
+                asyncio.create_task(srv.serve_forever()),
+                asyncio.create_task(self._tick_loop()),
+                asyncio.create_task(self._console_loop()),
+            ]
+            await self._shutdown.wait()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:
