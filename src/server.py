@@ -26,6 +26,7 @@ from simcore import SimCore
 from entity import Entity
 from prototype import load_prototype
 from world import tile_center, world_to_tile, in_reach
+from pathfinding import find_path
 from item import roll_drops, load_item
 from contracts import accept_contract, cancel_contract, ensure_board
 import interaction
@@ -69,6 +70,7 @@ class Connection:
         self.writer = writer
         self.player_id = player_id
         self.move_dir = (0.0, 0.0)   # latest held WASD direction from this client
+        self.pending_walk = None     # (wx, wy) click-to-walk destination (one-shot)
         self.pending_attack = None   # entity id this client wants to hit (one-shot)
         self.pending_break = None    # (tx, ty) tile this client wants to break (one-shot)
         self.pending_place = None    # (tx, ty) tile to place the held item on (one-shot)
@@ -148,6 +150,10 @@ class GameServer:
                 mtype = msg.get('type')
                 if mtype == 'move':
                     conn.move_dir = (_axis(msg.get('dx')), _axis(msg.get('dy')))
+                elif mtype == 'walk':
+                    x, y = _finite(msg.get('x')), _finite(msg.get('y'))
+                    if x is not None and y is not None:
+                        conn.pending_walk = (x, y)
                 elif mtype == 'attack':
                     tid = msg.get('target')
                     if isinstance(tid, str):
@@ -210,15 +216,26 @@ class GameServer:
     def _apply_move_intents(self, dt: float) -> None:
         for conn in self.conns.values():
             if conn.dead_until is not None:
+                conn.pending_walk = None
                 continue   # frozen while dead
             p = self.sim.world.entities.get(conn.player_id)
             if p is None:
                 continue
+            # click-to-walk: pathfind to the requested point. WASD (below) still
+            # preempts by clearing the path, so held keys always win.
+            if conn.pending_walk is not None:
+                gx, gy = conn.pending_walk
+                conn.pending_walk = None
+                goal = self.sim.world.nearest_walkable(*world_to_tile((gx, gy)))
+                p.path = (find_path(self.sim.world, world_to_tile(p.center), goal) or []) \
+                    if goal is not None else []
             dx, dy = conn.move_dir
             if dx or dy:
                 p.path = []
                 mx, my = movement.input_delta(p, dx, dy, dt)
                 movement.move_axis(self.sim.world, p, mx, my)
+            elif p.path:
+                movement.follow_path(p, self.sim.world, dt)
             movement.apply_knockback(self.sim.world, p, dt)
             movement.clamp_to_bounds(self.sim.world, p)
 

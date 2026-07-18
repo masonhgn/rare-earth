@@ -535,12 +535,17 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
                             elif ent is not None:
                                 exchange_panel.open_for(ent, (screen.width, screen.height))
                             else:
+                                tile = world_to_tile((wx, wy))
                                 target = _attack_target_at(world, wx, wy, local_id)
                                 if target is not None:
                                     netproto.send(sock, {'type': 'attack', 'target': target.id})
-                                else:
+                                elif (interaction.breakable_at(world, tile) is not None
+                                      and lp is not None and in_reach(lp, *tile)):
                                     _begin_break(world, local_id, world_renderer.break_system,
-                                                 sock, world_to_tile((wx, wy)))
+                                                 sock, tile)
+                                else:
+                                    # empty ground, or something out of reach: walk there.
+                                    netproto.send(sock, {'type': 'walk', 'x': wx, 'y': wy})
                 except OSError:
                     running = False
 
@@ -612,7 +617,9 @@ def run(host: str = '127.0.0.1', port: int = 5555) -> str | None:
         # advance the local break timer (progress bar); fires the intent on done
         _update_break(world, local_id, world_renderer.break_system, sock)
         # advance transient particles (hit dust); rendered by flush() below.
-        world_renderer.break_system.tick(dt)
+        # particle-only: the client owns the break timer (_update_break) and the
+        # server does the authoritative clear, so the SP finalize path is skipped.
+        world_renderer.break_system.tick_particles(dt)
         # advance the open machine's craft progress locally between server
         # updates so the bar is smooth; each 'machine' message re-syncs it.
         if factory_panel.open and factory_panel.entity is not None:

@@ -196,10 +196,13 @@ def update_player_animation(player, dx: float, dy: float) -> None:
     # near-equal components.
     if player.anim is None:
         return
-    if dx == 0 and dy == 0:
+    # below the 0.5 walk threshold on both axes => idle. exact-zero isn't enough:
+    # the net client eases the player toward the server position asymptotically,
+    # so a stopped player carries a perpetual sub-pixel residual that would
+    # otherwise keep the walk cycle playing forever.
+    if abs(dx) < 0.5 and abs(dy) < 0.5:
         player.anim.set_state('idle')
         return
-    # 0.5 threshold avoids flipping facing for sub-pixel rounding noise.
     if abs(dx) >= abs(dy):
         if dx > 0.5:
             player.anim.set_state('walking_right')

@@ -191,6 +191,14 @@ class BreakSystem:
         self._tick_active_break()
         self._tick_particles(dt)
 
+    def tick_particles(self, dt: float) -> None:
+        # visual-only tick for the net client: advance particles, but DON'T run
+        # the authoritative break finalize. the client owns the break timer
+        # itself (client._update_break) and the server does the real clear, so
+        # _tick_active_break here would double-handle it — and it assumes the
+        # single-player fixed-id 'player' entity, which doesn't exist over the net.
+        self._tick_particles(dt)
+
     # --- visuals (called by the game's render queueing) ---
 
     def visuals_for_entity(self, entity_id: str, now_ms: int) -> tuple[int, int, int]:
