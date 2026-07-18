@@ -121,8 +121,8 @@ class World:
         self.height = height
         self.map_grid = map_grid
         self.overlay_grid = overlay_grid
-        # loaded worlds carry no mask descriptors (they aren't saved yet), so the
-        # renderer draws no organic rock for them — see TODO on save/net support.
+        # clear mask descriptors; callers repopulate as available (the net client
+        # sets them from the join payload, save-load doesn't persist them yet).
         self.rock_patches = []
         self.entities.clear()
         self.tile_index.clear()

@@ -163,6 +163,9 @@ def _recv_map(sock, wd):
 
 def _build_world(world, wd, local_id, map_grid, overlay_grid) -> None:
     world.load_grids(wd['width'], wd['height'], map_grid, overlay_grid)
+    # rock-patch descriptors ride in the welcome; the client bakes the visuals
+    # locally from their seeds (load_grids cleared the list, so set it after).
+    world.rock_patches = netproto.decode_patches(wd.get('rock_patches', []))
     _apply_entities(world, wd['ents'], local_id)
     _apply_dropped(world, wd['dropped'])
 

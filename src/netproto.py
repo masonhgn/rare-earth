@@ -113,10 +113,29 @@ def chunk_grid_dims(width: int, height: int) -> tuple[int, int]:
     return math.ceil(width / CHUNK_TILES), math.ceil(height / CHUNK_TILES)
 
 
+def encode_patches(patches: list[dict]) -> list[int]:
+    # rock-patch descriptors are tiny (x, y, size, seed — all ints), so flatten
+    # them to one int array to keep the join payload compact. crucially the mask
+    # PIXELS are never sent: the client re-inflates the descriptors (decode_patches)
+    # and regenerates each blob locally from its seed via rockgen.patch_mask,
+    # which is deterministic, so every client renders identical rock.
+    flat: list[int] = []
+    for p in patches:
+        flat += (p['x'], p['y'], p['size'], p['seed'])
+    return flat
+
+
+def decode_patches(flat: list[int]) -> list[dict]:
+    return [
+        {'x': flat[i], 'y': flat[i + 1], 'size': flat[i + 2], 'seed': flat[i + 3]}
+        for i in range(0, len(flat), 4)
+    ]
+
+
 def world_join(world, spot_market, day_clock) -> dict:
     # the small welcome a connecting client needs to start building its world:
-    # dims + chunk plan + first snapshot + economy/clock. the static map itself
-    # follows as a stream of `chunk` frames (see map_chunks).
+    # dims + chunk plan + first snapshot + economy/clock + rock-patch descriptors.
+    # the static map itself follows as a stream of `chunk` frames (see map_chunks).
     cols, rows = chunk_grid_dims(world.width, world.height)
     return {
         'width': world.width,
@@ -127,6 +146,7 @@ def world_join(world, spot_market, day_clock) -> dict:
         'dropped': dropped_snapshot(world),
         'spot_prices': dict(spot_market.prices),
         'day_elapsed': day_clock.elapsed,
+        'rock_patches': encode_patches(getattr(world, 'rock_patches', [])),
     }
 
 

@@ -574,8 +574,8 @@ class WorldRenderer:
     def _queue_rock(self, cam, culling) -> None:
         # blit each visible rock patch: a rock texture composited through the
         # patch's organic mask (baked once, cached). draws over the grass base
-        # and under the ore overlay. patches only exist on freshly generated
-        # worlds — loaded/joined worlds have none yet (not saved/streamed).
+        # and under the ore overlay. patches come from world-gen locally or from
+        # the join payload over the net; save-loaded worlds have none yet.
         patches = getattr(self.world, 'rock_patches', None)
         if not patches:
             return

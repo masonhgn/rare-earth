@@ -257,6 +257,7 @@ def _serialize_world(w, now_ms: int) -> dict:
     # player-owning entity is skipped — single-player restores the player from
     # data['player'] and the server spawns players per-connection, so neither
     # persists it here. used by both save_game and save_world.
+    import netproto  # local: netproto imports save_state, so avoid a top-level cycle
     saved_entities = [
         {
             'id': ent.id,
@@ -272,6 +273,9 @@ def _serialize_world(w, now_ms: int) -> dict:
         'height': w.height,
         'map_grid': _rle_encode(w.map_grid),
         'overlay_grid': _rle_encode(w.overlay_grid),
+        # organic rock shapes: only the descriptors (x, y, size, seed) are saved;
+        # the mask pixels are regenerated from the seeds at render time (rockgen).
+        'rock_patches': netproto.encode_patches(getattr(w, 'rock_patches', [])),
         'entities': saved_entities,
         'dropped': [
             {'item_id': d.item_id, 'quantity': d.quantity,
@@ -411,9 +415,13 @@ def _apply_world(w, wd: dict, now_ms: int) -> None:
     # wipe the world and repopulate grids + placed entities + dropped items
     # from a saved `world` blob. shared by load_game and load_world. width/height
     # first — the RLE grid decode needs them to reshape rows.
+    import netproto  # local: netproto imports save_state, so avoid a top-level cycle
     width, height = wd['width'], wd['height']
     w.load_grids(width, height, _rle_decode(wd['map_grid'], width, height),
                  _rle_decode(wd['overlay_grid'], width, height))
+    # rock-patch descriptors (absent in pre-feature saves); load_grids cleared the
+    # list, so restore after. the renderer bakes the visuals from the seeds.
+    w.rock_patches = netproto.decode_patches(wd.get('rock_patches', []))
 
     # placed entities keep their original ids so future save references stay stable.
     for e_data in wd['entities']:
