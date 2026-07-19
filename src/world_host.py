@@ -244,21 +244,23 @@ class WorldHost:
     def _pursue_attack(self, conn, p, target_id: str) -> None:
         target = self.sim.world.entities.get(target_id)
         if target is None or target.health is None or 'mob' not in target.components:
-            conn.pending_action = None   # gone / invalid: stop pursuing
+            conn.pending_action = None   # dead / gone / invalid: disengage
             p.path = []
             return
         (pcx, pcy), (tcx, tcy) = p.center, target.center
         if (pcx - tcx) ** 2 + (pcy - tcy) ** 2 <= PLAYER_ATTACK_RANGE ** 2:
-            # in range: swing if off cooldown, then clear (one swing per click,
-            # like single-player). emit rides the snapshot to every client.
+            # in range: hold position and swing on each cooldown. pending_action
+            # is NOT cleared — clicking a mob AUTO-ATTACKS it until it dies (or
+            # the player moves / clicks elsewhere), rather than one swing per
+            # click. the emit rides the snapshot to every client.
+            p.path = []
             if conn.attack_cd <= 0.0:
                 self.sim.world.emit('attack', id=p.id, facing='left' if tcx < pcx else 'right')
                 movement.knock_back(p, target)
                 self.sim.combat.hit(p, target, pg.time.get_ticks())
                 conn.attack_cd = PLAYER_ATTACK_CD
-            conn.pending_action = None
-            p.path = []
         else:
+            # knocked / walked out of range: close the (now small) gap again.
             self._repath_toward(conn, p, world_to_tile(target.center))
 
     def _pursue_break(self, conn, p, tile) -> None:

@@ -466,7 +466,9 @@ class MapView:
             self._version = ov.version
 
     def render(self, target: pg.Surface, screen_size: tuple[int, int],
-               camera) -> None:
+               camera, player=None) -> None:
+        # `player` is the local player entity (passed explicitly: the net client's
+        # player isn't the fixed 'player' id, so world.get_player() would KeyError).
         if not self.open:
             return
         self._ensure_surface()
@@ -512,9 +514,9 @@ class MapView:
         for mob in world.entities_with('mob'):
             mx, my = to_screen(mob.world_x, mob.world_y)
             pg.draw.circle(target, (230, 60, 60), (mx, my), 4)
-        player = world.get_player()
-        px, py = to_screen(*player.center)
-        pg.draw.circle(target, (255, 230, 70), (px, py), 5)
+        if player is not None:
+            px, py = to_screen(*player.center)
+            pg.draw.circle(target, (255, 230, 70), (px, py), 5)
 
         # title + hint
         target.blit(get_font(28).render('World Map', True, (235, 225, 200)),

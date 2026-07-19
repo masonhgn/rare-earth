@@ -18,7 +18,7 @@
     "collateral_ratio": 1.5,
     "resource_out_prob": 0.7,
 
-    "knockback_tiles": 2.5,
+    "knockback_tiles": 1.0,
     "knockback_decay": 14.0,
 
     "predict_correct": 10.0,
@@ -26,7 +26,7 @@
     "snap_dist": 96.0,
 
     "rock_stone_cov": 0.5,
-    "rock_ore_cov": 0.85,
+    "rock_ore_cov": 1.0,
     "rock_ore_rate": 0.35,
     "rock_cov_res": 3,
     "rock_octaves": 5,

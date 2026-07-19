@@ -99,8 +99,8 @@ class World:
 
     # coverage thresholds for projecting a patch mask down to the coarse gameplay
     # grid (all from data/balance.json). a tile is logical rock once >=
-    # ROCK_STONE_COV of it is covered; ore is only ever seeded where the tile is
-    # nearly solid rock (ROCK_ORE_COV), so it can't land on a ragged boundary
+    # ROCK_STONE_COV of it is covered; ore is only ever seeded on a FULLY covered
+    # tile (ROCK_ORE_COV = 1.0), so it never lands on a ragged half-grass boundary
     # tile. cells in between are cosmetic edge — grass for logic.
     ROCK_STONE_COV = balance.ROCK_STONE_COV
     ROCK_ORE_COV = balance.ROCK_ORE_COV
@@ -160,12 +160,12 @@ class World:
         cov = tile_coverage(patch_mask(n * self.COV_RES, seed, octaves=3),
                             self.COV_RES)  # (n, n) 0..1
 
-        # random top-left tile; allow the patch to hang partly off the map (writes
-        # are clipped below, the renderer culls the off-screen part).
-        lo_x, hi_x = -radius, self.width - n + radius
-        lo_y, hi_y = -radius, self.height - n + radius
-        tx0 = random.randint(min(lo_x, hi_x), max(lo_x, hi_x))
-        ty0 = random.randint(min(lo_y, hi_y), max(lo_y, hi_y))
+        # random top-left tile, kept fully inside the map so no rock renders past
+        # the world edge (the visual descriptor covers the whole n x n span).
+        hi_x = max(0, self.width - n)
+        hi_y = max(0, self.height - n)
+        tx0 = random.randint(0, hi_x)
+        ty0 = random.randint(0, hi_y)
         self.rock_patches.append({
             'x': tx0 * TILE_LENGTH, 'y': ty0 * TILE_LENGTH,
             'size': n * TILE_LENGTH, 'seed': seed,

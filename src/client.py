@@ -696,7 +696,7 @@ class Client:
         self.factory_panel.render(screen.surface, (screen.width, screen.height))
         self.settings_panel.render(screen.surface, (screen.width, screen.height))
         self.player_panel.render(screen.surface, (screen.width, screen.height), player)
-        self.map_view.render(screen.surface, (screen.width, screen.height), screen.camera)
+        self.map_view.render(screen.surface, (screen.width, screen.height), screen.camera, player)
         # skill feedback: level-up toasts + a gated-break message.
         toast_now = pg.time.get_ticks()
         self.level_toasts.pump(world, toast_now)

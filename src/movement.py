@@ -19,6 +19,13 @@ KNOCKBACK_SPEED = TILE_LENGTH * KNOCKBACK_DECAY * KNOCKBACK_TILES   # initial px
 # movement steps, which must stay bit-identical for prediction to reconcile.
 DIAG = 0.7071067811865475
 
+# facing/animation thresholds. MOVE_THRESHOLD: below this on both axes the
+# entity reads as idle. FACING_FLIP: while already walking one axis, the other
+# must exceed it by this factor to switch — hysteresis that stops a diagonal
+# from flickering between the horizontal and vertical walk cycle.
+MOVE_THRESHOLD = 0.5
+FACING_FLIP = 1.4
+
 
 def _blocked(world, entity) -> bool:
     # True if `entity`'s hitbox overlaps a solid (tile-locked) entity's
@@ -189,36 +196,38 @@ def follow_path(entity, world, dt: float, speed: float | None = None) -> tuple[f
 
 
 def update_player_animation(player, dx: float, dy: float) -> None:
-    # single canonical animation update, run after movement is resolved.
-    # facing follows the dominant axis; ties (|dx| == |dy|, i.e. diagonal
-    # movement) go to horizontal — preserves the previous left/right
-    # preference and avoids flicker when the path follower bounces between
-    # near-equal components.
-    if player.anim is None:
+    # single canonical animation update, run after movement is resolved. facing
+    # follows the dominant axis, but with HYSTERESIS: on a diagonal the two
+    # components are near-equal and — because the net client eases toward
+    # 0.1px-rounded server positions — cross back and forth each frame. without
+    # a margin that made the sprite flicker between the horizontal and vertical
+    # walk. so we only flip axis when the other one beats the current by FLIP.
+    anim = player.anim
+    if anim is None:
         return
     # while a one-shot swing is mid-play, leave facing/state alone so the swing
     # isn't clobbered; looping movement (idle/walk) resumes on its own the frame
-    # after it finishes. centralized here so every caller — sp, the net client's
+    # after it finishes. centralized here so every caller — the net client's
     # per-frame interpolation, and mobs — respects it.
-    if player.anim.oneshot and not player.anim.finished:
+    if anim.oneshot and not anim.finished:
         return
-    # below the 0.5 walk threshold on both axes => idle. exact-zero isn't enough:
-    # the net client eases the player toward the server position asymptotically,
-    # so a stopped player carries a perpetual sub-pixel residual that would
-    # otherwise keep the walk cycle playing forever.
-    if abs(dx) < 0.5 and abs(dy) < 0.5:
-        player.anim.set_state('idle')
+    ax, ay = abs(dx), abs(dy)
+    # below the walk threshold on both axes => idle. exact-zero isn't enough: the
+    # asymptotic ease leaves a perpetual sub-pixel residual on a stopped player.
+    if ax < MOVE_THRESHOLD and ay < MOVE_THRESHOLD:
+        anim.set_state('idle')
         return
-    if abs(dx) >= abs(dy):
-        if dx > 0.5:
-            player.anim.set_state('walking_right')
-        elif dx < -0.5:
-            player.anim.set_state('walking_left')
+    cur = anim.current_state
+    if cur in ('walking_left', 'walking_right') and ax >= MOVE_THRESHOLD and ay <= ax * FACING_FLIP:
+        horizontal = True                 # already horizontal, vertical hasn't clearly won: stay
+    elif cur in ('walking_up', 'walking_down') and ay >= MOVE_THRESHOLD and ax <= ay * FACING_FLIP:
+        horizontal = False                # already vertical, horizontal hasn't clearly won: stay
     else:
-        if dy > 0.5:
-            player.anim.set_state('walking_down')
-        elif dy < -0.5:
-            player.anim.set_state('walking_up')
+        horizontal = ax >= ay             # fresh / a clear winner: dominant axis (ties -> horizontal)
+    if horizontal:
+        anim.set_state('walking_right' if dx > 0 else 'walking_left')
+    else:
+        anim.set_state('walking_down' if dy > 0 else 'walking_up')
 
 
 def clamp_to_bounds(world, entity) -> None:

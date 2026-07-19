@@ -71,6 +71,37 @@ def test_walk_then_attack_walks_over_and_hits():
     assert hit, 'player never reached and hit the out-of-range goblin'
 
 
+def test_attack_auto_repeats_from_a_single_click():
+    # a single attack click AUTO-ATTACKS: the host keeps swinging on cooldown
+    # while in range, instead of one swing per click.
+    sim, host, conn, p, (tx, ty) = _arena()
+    gob = Entity(load_prototype('goblin'), ((tx + 1) * TILE_LENGTH, ty * TILE_LENGTH))
+    sim.world.add_entity(gob)
+    # make both combatants tanky so neither dies while we count swings.
+    gob.max_health = gob.health = 100000
+    p.max_health = p.health = 100000
+
+    host.apply_intent(conn, {'type': 'attack', 'target': gob.id})
+    swings = 0
+    for _ in range(80):   # ~4s; at a 0.4s cooldown that's several swings
+        host.tick(1 / 20)
+        swings += sum(1 for e in sim.world.events if e['kind'] == 'attack' and e.get('id') == p.id)
+        sim.world.events.clear()   # stand in for snapshot_msg draining events
+    assert swings >= 2, f'a single click should auto-attack repeatedly, saw {swings}'
+    assert conn.pending_action is not None, 'should stay engaged while the target lives'
+
+
+def test_attack_disengages_when_target_gone():
+    sim, host, conn, p, (tx, ty) = _arena()
+    gob = Entity(load_prototype('goblin'), ((tx + 1) * TILE_LENGTH, ty * TILE_LENGTH))
+    sim.world.add_entity(gob)
+    host.apply_intent(conn, {'type': 'attack', 'target': gob.id})
+    host.tick(1 / 20)                 # engage
+    sim.world.remove_entity(gob.id)   # target dies / despawns
+    host.tick(1 / 20)
+    assert conn.pending_action is None, 'should disengage once the target is gone'
+
+
 def test_wasd_preempts_a_queued_pursuit():
     sim, host, conn, p, (tx, ty) = _arena()
     ore_tile = (tx + 5, ty)

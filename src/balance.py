@@ -35,7 +35,7 @@ _defaults = {
     'collateral_ratio': 1.5,
     'resource_out_prob': 0.7,
     # knockback
-    'knockback_tiles': 2.5,
+    'knockback_tiles': 1.0,
     'knockback_decay': 14.0,
     # netcode smoothing (client-side feel)
     'predict_correct': 10.0,
