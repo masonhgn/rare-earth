@@ -46,15 +46,18 @@ def draw_build_highlight(world_surface, world, cam, player, held, cursor_pos) ->
     # game.hover_pos; client: pg.mouse.get_pos()).
     if held is None or load_item(held['item_id']).places is None:
         return
-    wx, wy = cam.screen_to_world(cursor_pos)
+    wx, wy = cam.pick(cursor_pos)   # perspective-aware cursor -> tile
     tile = world_to_tile((wx, wy))
     if not world.in_bounds_tile(*tile):
         return
     tx, ty = tile
-    sx, sy = cam.world_to_screen((tx * TILE_LENGTH, ty * TILE_LENGTH))
     color = (80, 220, 90) if interaction.can_place(world, player, tile, held) else (220, 70, 70)
-    pg.draw.rect(world_surface, color,
-                 pg.Rect(round(sx), round(sy), TILE_LENGTH, TILE_LENGTH), width=3)
+    # outline the tile on the tilted ground: project all four corners so the
+    # highlight is a trapezoid matching the warped grid, not a flat square.
+    corners = [cam.project_ground((cx * TILE_LENGTH, cy * TILE_LENGTH))
+               for cx, cy in ((tx, ty), (tx + 1, ty), (tx + 1, ty + 1), (tx, ty + 1))]
+    pg.draw.polygon(world_surface, color,
+                    [(round(x), round(y)) for x, y in corners], width=3)
 
 
 def draw_build_indicator(surface) -> None:

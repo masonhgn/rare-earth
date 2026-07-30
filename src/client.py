@@ -38,6 +38,7 @@ from settings_panel import SettingsPanel
 from player_panel import PlayerPanel
 from hud import Hud
 from hud_tabs import HudTabs
+from persp_debug import PerspectivePanel
 from dev_console import DevConsole
 import hud_render
 import interaction
@@ -332,6 +333,8 @@ class Client:
             ('settings', f'{TABS_DIR}/settings.png', self._toggle_settings),
         ])
         self.level_toasts = hud_render.LevelUpToasts()
+        # temporary on-screen controls for the perspective-ground prototype.
+        self.persp_panel = PerspectivePanel(self.screen.perspective)
         # developer console (backtick): single-player only. its command table
         # comes from the transport — LocalTransport exposes admin_commands()
         # (direct sim mutation), SocketTransport doesn't, so multiplayer has none.
@@ -418,6 +421,10 @@ class Client:
                 self._on_wheel(event)
             elif event.type == pg.MOUSEBUTTONDOWN and event.button == 1:
                 self._on_click(event.pos)
+            elif event.type == pg.MOUSEBUTTONUP and event.button == 1:
+                self.persp_panel.handle_release()   # end a slider drag
+            elif event.type == pg.MOUSEMOTION:
+                self.persp_panel.handle_motion(event.pos)   # live slider drag
 
     def _on_keydown(self, event) -> None:
         kb = self.kb
@@ -446,6 +453,16 @@ class Client:
             self.display.cycle_mode()
         elif event.key == kb['hud']:
             self.hud.toggle()
+        # tier-1 perspective ground prototype: F6 toggles, F7/F8 tune strength.
+        elif event.key == pg.K_F6:
+            p = self.screen.perspective
+            p.enabled = not p.enabled
+        elif event.key == pg.K_F7:
+            p = self.screen.perspective
+            p.strength = max(0.0, round(p.strength - 0.02, 2))
+        elif event.key == pg.K_F8:
+            p = self.screen.perspective
+            p.strength = min(0.8, round(p.strength + 0.02, 2))
 
     def _on_wheel(self, event) -> None:
         if self.exchange_panel.open:
@@ -460,6 +477,8 @@ class Client:
         # player's _on_left_click, but world actions become intents.
         if self.dev_console is not None and self.dev_console.open:
             return   # console open: swallow world/ui clicks behind it
+        if self.persp_panel.handle_click(pos):
+            return   # perspective debug panel consumed the click
         world, local_id = self.world, self.local_id
         lp = world.entities.get(local_id)
         held = lp.held_item if lp is not None else None
@@ -529,7 +548,7 @@ class Client:
 
     def _on_world_click(self, pos, lp, held) -> None:
         world, local_id = self.world, self.local_id
-        wx, wy = self.screen.camera.screen_to_world(pos)
+        wx, wy = self.screen.camera.pick(pos)   # perspective-aware mouse -> world
         self.pending_open = None   # a fresh world click cancels a queued open
         if self.build_mode:
             tile = world_to_tile((wx, wy))
@@ -692,6 +711,7 @@ class Client:
                                 screen.camera.offset, player.center)
             self.inventory.render(screen.surface)
         self.hud_tabs.render(screen.surface)
+        self.persp_panel.render(screen.surface)
         self.exchange_panel.render(screen.surface, (screen.width, screen.height))
         self.factory_panel.render(screen.surface, (screen.width, screen.height))
         self.settings_panel.render(screen.surface, (screen.width, screen.height))

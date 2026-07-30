@@ -225,13 +225,18 @@ class BreakSystem:
         if bk is None:
             return
         ox, oy = 0, 0
-        if bk.entity_id is not None:
+        is_entity = bk.entity_id is not None
+        if is_entity:
             entity = self.world.entities.get(bk.entity_id)
             if entity is not None and entity.prototype.render_offset is not None:
                 ox, oy = entity.prototype.render_offset
         progress = bk.progress(pg.time.get_ticks())
         tx, ty = bk.tile
-        sx, sy = camera.world_to_screen((tx * TILE_LENGTH + ox, ty * TILE_LENGTH + oy))
+        wpos = (tx * TILE_LENGTH + ox, ty * TILE_LENGTH + oy)
+        # a broken ground tile sits on the tilted floor (project_ground); a
+        # broken entity is drawn flat, so its bar follows the flat sprite.
+        sx, sy = (camera.world_to_screen(wpos) if is_entity
+                  else camera.project_ground(wpos))
         bar_w = TILE_LENGTH - 8
         bar_h = 4
         bar_x = sx + 4
@@ -256,7 +261,7 @@ class BreakSystem:
             alpha = max(0, int(255 * (1 - life)))
             surf = pg.Surface((p.size, p.size), pg.SRCALPHA)
             surf.fill((*p.color, alpha))
-            sx, sy = camera.world_to_screen((p.world_x, p.world_y))
+            sx, sy = camera.project_ground((p.world_x, p.world_y))   # on the tilted ground
             renderer.queue('highlight', surf, (sx, sy))
 
     # --- private ---

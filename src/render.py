@@ -37,6 +37,14 @@ from ui_theme import get_font
 # the rock, and both sit under everything dynamic.
 LAYERS = ['terrain', 'rock', 'overlay', 'shadow', 'dropped', 'entity', 'player', 'highlight']
 
+# split of LAYERS used by the tier-1 perspective path: only the ground layers
+# get keystoned; the dynamic layers draw flat on top so entities stay upright.
+GROUND_LAYERS = ['terrain', 'rock', 'overlay']
+DYNAMIC_LAYERS = ['shadow', 'dropped', 'entity', 'player', 'highlight']
+
+# sky fill behind the map edge and in the empty corners the ground warp leaves.
+SKY_COLOR = (170, 210, 240)
+
 # how long the yellow click marker stays visible (fades to 0 over this span)
 CLICK_MARKER_MS = 500
 
@@ -62,6 +70,11 @@ class Camera:
         self.offset = pg.math.Vector2(0, 0)
         self.screen_w, self.screen_h = screen_size
         self.zoom = 1.0
+        # set by Screen; when enabled, pick()/project_ground() route through the
+        # ground warp so mouse-picking and ground overlays match the tilted view.
+        # world_to_screen/screen_to_world stay FLAT (the terrain render draws
+        # flat into the ground buffer, then the warp tilts the whole buffer).
+        self.perspective = None
 
     def update_screen_size(self, w: int, h: int) -> None:
         self.screen_w, self.screen_h = w, h
@@ -83,6 +96,28 @@ class Camera:
         # scale to land back in the offscreen world surface, then add offset.
         return (screen_pos[0] / self.zoom + self.offset.x,
                 screen_pos[1] / self.zoom + self.offset.y)
+
+    def pick(self, screen_pos: tuple[float, float]) -> tuple[float, float]:
+        # like screen_to_world but perspective-aware: maps a display pixel to the
+        # world point drawn under it on the tilted ground. identical to
+        # screen_to_world when perspective is off.
+        x = screen_pos[0] / self.zoom
+        y = screen_pos[1] / self.zoom
+        p = self.perspective
+        if p is not None and p.enabled:
+            x, y = p.unproject(x, y, self.screen_w, self.screen_h)
+        return (x + self.offset.x, y + self.offset.y)
+
+    def project_ground(self, world_pos: tuple[float, float]) -> tuple[float, float]:
+        # like world_to_screen but perspective-aware: where a ground-plane world
+        # point lands on the warped ground (world-surface coords). for ground-
+        # attached overlays; entity-attached overlays stay on world_to_screen.
+        x = world_pos[0] - self.offset.x
+        y = world_pos[1] - self.offset.y
+        p = self.perspective
+        if p is not None and p.enabled:
+            x, y = p.project(x, y, self.screen_w, self.screen_h)
+        return (x, y)
 
 
 class ViewFrustum:
@@ -133,11 +168,201 @@ class Renderer:
         self._batches[layer].append((image, screen_pos))
 
     def flush(self, layer_order: list[str]) -> None:
+        self.flush_to(self.surface, layer_order)
+
+    def flush_to(self, surface: pg.Surface, layer_order: list[str],
+                 offset: tuple[int, int] = (0, 0)) -> None:
+        # drain only the named layers to `surface`, popping each so a second
+        # flush_to (perspective path draws ground then dynamic separately)
+        # doesn't re-blit them. layers not listed stay queued. `offset` shifts
+        # every blit (the perspective ground buffer is larger than the screen,
+        # so ground layers are drawn inset by the buffer margins).
+        ox, oy = offset
         for layer in layer_order:
             batch = self._batches.get(layer)
             if batch:
-                self.surface.blits(batch)
-        self._batches.clear()
+                if ox or oy:
+                    batch = [(img, (x + ox, y + oy)) for img, (x, y) in batch]
+                surface.blits(batch)
+            self._batches.pop(layer, None)
+
+
+class Perspective:
+    # tier-1 fake-3d ground: projects the flat terrain onto a receding floor
+    # plane. near (bottom) rows show a narrow world span at full width; far (top)
+    # rows show a WIDER span so the screen stays edge-to-edge full (no blue side
+    # gaps) while far tiles shrink. the map is isotropic -- horizontal and
+    # vertical magnification match at every row -- so tiles stay square.
+    #
+    # this is purely a display warp of the terrain surface: entities, mouse
+    # picking, and culling all still operate in the flat world, so at subtle
+    # strengths characters read as standing on the tilted ground without any
+    # coordinate-system change. crank strength up and the illusion breaks (flat
+    # entities float on a strongly-raked floor) -- that's the tier-2 boundary.
+    #
+    # because far rows sample a span wider than the screen, the source (the
+    # `ground` buffer) is rendered LARGER than the screen -- see buffer_size /
+    # WorldRenderer. geometry, with screen row y from 0 (top) to h-1 (bottom)
+    # and a virtual horizon H0 px above the top:
+    #   scale(y) = (y + H0) / (h-1 + H0)   linear -> straight edges; 1 at bottom
+    #   span(y)  = w / scale(y)            world width shown across the screen row
+    #   depth(y) = integral of 1/scale     log; makes vertical match horizontal
+    #
+    # two implementations, auto-selected by a one-time self-probe:
+    #   fast  -- a stack of C-optimized transform.scale strips (~25x cheaper).
+    #   safe  -- a per-pixel numpy gather (bulletproof coverage, ~30ms+).
+    # the fast path once rendered blank in exclusive fullscreen: there the
+    # display format carries an alpha channel, so .convert() surfaces did too,
+    # and transform.scale then produced alpha-BLEND strips whose blits vanished
+    # (see pygame newsurf_fromsurf). the fix is to keep the warp buffers in a
+    # forced no-alpha format (see _new_buf); the probe is belt-and-suspenders --
+    # if the fast path ever fails to render an opaque test pattern on this
+    # machine, we fall back to the gather so the ground can never blue out.
+    BANDS = 120
+
+    def __init__(self, strength: float = 0.5, enabled: bool = True):
+        self.strength = strength
+        self.enabled = enabled
+        self._out: pg.Surface | None = None
+        self._fast_ok: bool | None = None            # None until probed
+        self._lay_key: tuple | None = None
+        self._lay: tuple | None = None
+        # gather-path state (only built if the fast path is rejected)
+        self._key: tuple | None = None
+        self._sx = None
+        self._sy = None
+
+    @staticmethod
+    def _new_buf(w: int, h: int) -> pg.Surface:
+        # forced no-alpha 32-bit: transform.scale of a no-alpha source can't
+        # inherit a blend mode, so strips always blit opaque (see class doc).
+        return pg.Surface((w, h), 0, 32)
+
+    def _layout(self, w: int, h: int):
+        # (Wbuf, Hbuf, mx, myt, H0, denom) for the current strength + screen
+        # size. Wbuf/Hbuf are the source-buffer dims; mx/myt place the screen
+        # region inside it (extra width both sides, extra height only at top).
+        key = (w, h, self.strength)
+        if self._lay_key != key:
+            a = self.strength
+            m_top = 1.0 - a
+            H0 = m_top * (h - 1) / a                  # horizon height above top
+            denom = (h - 1) + H0
+            wbuf = int(math.ceil(w / m_top))
+            d_total = denom * math.log(denom / H0)    # far-row depth, px
+            hbuf = int(math.ceil(d_total)) + 1
+            self._lay = (wbuf, hbuf, (wbuf - w) // 2, hbuf - h, H0, denom)
+            self._lay_key = key
+        return self._lay
+
+    def buffer_size(self, w: int, h: int) -> tuple[int, int, int, int]:
+        # source-buffer size + offsets the caller renders terrain into. at ~0
+        # strength there's no warp, so the buffer is just the screen.
+        if self.strength < 1e-6:
+            return (w, h, 0, 0)
+        wbuf, hbuf, mx, myt, _, _ = self._layout(w, h)
+        return (wbuf, hbuf, mx, myt)
+
+    def unproject(self, x_s: float, y_s: float, w: int, h: int) -> tuple[float, float]:
+        # screen-space point (world-surface coords) -> flat-terrain screen point,
+        # i.e. which flat tile is drawn under this pixel of the warped ground.
+        # this is the SAME sampling map the warp uses (screen -> ground buffer),
+        # then undoing the buffer's margin offset. used for mouse picking.
+        if self.strength < 1e-6:
+            return (x_s, y_s)
+        wbuf, hbuf, mx, myt, H0, denom = self._layout(w, h)
+        ys = min(max(y_s, 0.0), h - 1)
+        scale = (ys + H0) / denom
+        x_b = wbuf / 2.0 + (x_s - w / 2.0) / scale
+        y_b = (hbuf - 1) - denom * math.log(denom / (ys + H0))
+        return (x_b - mx, y_b - myt)
+
+    def project(self, x_f: float, y_f: float, w: int, h: int) -> tuple[float, float]:
+        # inverse of unproject: a flat-terrain screen point -> where it lands on
+        # the warped ground. used to place ground-attached overlays (click
+        # marker, build highlight, break bar) on the tilted floor.
+        if self.strength < 1e-6:
+            return (x_f, y_f)
+        wbuf, hbuf, mx, myt, H0, denom = self._layout(w, h)
+        x_b = x_f + mx
+        y_b = y_f + myt
+        ys = denom * math.exp(-((hbuf - 1) - y_b) / denom) - H0
+        scale = (ys + H0) / denom
+        x_s = w / 2.0 + (x_b - wbuf / 2.0) * scale
+        return (x_s, ys)
+
+    def _ensure_out(self, w: int, h: int) -> None:
+        if self._out is None or self._out.get_size() != (w, h):
+            self._out = self._new_buf(w, h)
+
+    def warp(self, src: pg.Surface, w: int, h: int) -> pg.Surface:
+        # src is the enlarged ground buffer; returns a (w, h) screen-size surface.
+        self._ensure_out(w, h)
+        if self.strength < 1e-6:                      # identity: no warp
+            self._out.blit(src, (0, 0))
+            return self._out
+        if self._fast_ok is None:
+            self._fast_ok = self._probe()
+        if self._fast_ok:
+            self._strips(src, self._out, w, h)
+        else:
+            self._gather(src, w, h)
+        return self._out
+
+    def _strips(self, src: pg.Surface, out: pg.Surface, w: int, h: int) -> None:
+        # one C-optimized transform.scale per horizontal band: a wide source
+        # sub-rect (span x depth-slice) squeezed to full screen width.
+        wbuf, hbuf, mx, myt, H0, denom = self._layout(w, h)
+        out.fill(SKY_COLOR)                           # safety, if a rect clamps short
+        nb = min(self.BANDS, h)
+        for i in range(nb):
+            y0 = i * h // nb
+            y1 = (i + 1) * h // nb
+            if y1 <= y0:
+                continue
+            scale = ((y0 + y1) * 0.5 + H0) / denom    # band-center magnification
+            sw = w / scale                            # world span across this row
+            sx0 = (wbuf - sw) * 0.5
+            # y0 is the higher (farther) edge -> larger depth -> smaller src row
+            top = (hbuf - 1) - denom * math.log(denom / (y0 + H0))
+            bot = (hbuf - 1) - denom * math.log(denom / (y1 + H0))
+            ix = max(0, int(sx0))
+            iw = max(1, min(wbuf - ix, int(round(sw))))
+            it = max(0, min(hbuf - 1, int(top)))
+            ib = max(it + 1, min(hbuf, int(round(bot))))
+            strip = src.subsurface((ix, it, iw, ib - it))
+            out.blit(pg.transform.scale(strip, (w, y1 - y0)), (0, y0))
+
+    def _probe(self) -> bool:
+        # one-time: does the fast path render an opaque test pattern on this
+        # display format? if not (the fullscreen-alpha failure), use gather.
+        c = (7, 190, 3)
+        wbuf, hbuf, _, _ = self.buffer_size(32, 32)
+        test = self._new_buf(wbuf, hbuf)
+        test.fill(c)
+        out = self._new_buf(32, 32)
+        self._strips(test, out, 32, 32)
+        return out.get_at((16, 30))[:3] == c          # bottom row, full coverage
+
+    def _rebuild(self, w: int, h: int) -> None:
+        wbuf, hbuf, mx, myt, H0, denom = self._layout(w, h)
+        ys = np.arange(h)
+        scale = (ys + H0) / denom
+        depth = denom * np.log(denom / (ys + H0))
+        src_y = np.rint((hbuf - 1) - depth).astype(np.intp)
+        xs = np.arange(w)
+        src_x = wbuf / 2.0 + (xs[:, None] - w / 2.0) / scale[None, :]
+        self._sx = np.clip(np.rint(src_x).astype(np.intp), 0, wbuf - 1)
+        self._sy = np.clip(np.broadcast_to(src_y[None, :], (w, h)), 0, hbuf - 1)
+        self._key = (w, h, self.strength)
+
+    def _gather(self, src: pg.Surface, w: int, h: int) -> None:
+        if self._key != (w, h, self.strength):
+            self._rebuild(w, h)
+        px = pg.surfarray.pixels3d(src)
+        out = pg.surfarray.pixels3d(self._out)
+        out[...] = px[self._sx, self._sy]             # full coverage -> no sky mask
+        del px, out
 
 
 def _desktop_size(*, default: tuple[int, int]) -> tuple[int, int]:
@@ -184,6 +409,8 @@ class Screen:
         self.camera.zoom = self.zoom
         self.culling = ViewFrustum(ew, eh)
         self.renderer = Renderer(self.world_surface)
+        self.perspective = Perspective()
+        self.camera.perspective = self.perspective
 
     def _make_world_surface(self) -> pg.Surface:
         # offscreen render target sized so that scaling it up by `zoom` fills
@@ -238,7 +465,7 @@ class Screen:
             self.surface = pg.display.set_mode((width, height), 0)
         self.width, self.height = self.surface.get_size()
 
-    def clear(self, color=(170, 210, 240)) -> None:
+    def clear(self, color=SKY_COLOR) -> None:
         # clears the offscreen world surface (present_world then paints the
         # whole display), so the sky color shows through beyond the map edge.
         self.world_surface.fill(color)
@@ -525,6 +752,30 @@ class MapView:
         target.blit(hint, (ox + dw - hint.get_width(), max(6, oy - 26)))
 
 
+class _ExpandedFrustum:
+    # ground-only culling for the perspective path: covers the enlarged source
+    # buffer, i.e. the screen region [-mx, w+mx] x [-myt, h], so terrain fills
+    # the wider/taller ground buffer the warp samples from. exposes just the two
+    # methods the ground queue calls (tile_range, visible_world_rect).
+    def __init__(self, w: int, h: int, mx: int, myt: int, margin: int):
+        self._left = -mx - margin
+        self._top = -myt - margin
+        self._w = w + 2 * mx + 2 * margin
+        self._h = h + myt + 2 * margin
+
+    def visible_world_rect(self, camera_offset) -> pg.Rect:
+        return pg.Rect(camera_offset.x + self._left, camera_offset.y + self._top,
+                       self._w, self._h)
+
+    def tile_range(self, camera_offset, map_w: int, map_h: int):
+        vr = self.visible_world_rect(camera_offset)
+        tx0 = max(int(vr.left // TILE_LENGTH), 0)
+        tx1 = min(int(vr.right // TILE_LENGTH) + 1, map_w)
+        ty0 = max(int(vr.top // TILE_LENGTH), 0)
+        ty1 = min(int(vr.bottom // TILE_LENGTH) + 1, map_h)
+        return tx0, ty0, tx1, ty1
+
+
 class WorldRenderer:
     # queues the world layers (terrain -> overlay -> entities -> dropped ->
     # click marker) plus the break-system visuals onto the screen renderer,
@@ -544,16 +795,50 @@ class WorldRenderer:
         self._rock_frame = 0
 
     def flush(self, cam, culling, click_marker):
-        self._queue_terrain(cam, culling)
-        self._queue_rock(cam, culling)
-        self._queue_overlay(cam, culling)
+        persp = self.screen.perspective
+        renderer = self.screen.renderer
+        world_surf = self.screen.world_surface
+        w, h = world_surf.get_size()
+
+        # ground layers use an enlarged culling when perspective is on, so the
+        # bigger source buffer (which the far rows sample wide from) is filled
+        # edge to edge instead of leaving blue gaps. dynamic layers stay on the
+        # normal screen culling and draw flat.
+        if persp.enabled:
+            wbuf, hbuf, mx, myt = persp.buffer_size(w, h)
+            gcull = _ExpandedFrustum(w, h, mx, myt, CULLING_MARGIN)
+        else:
+            gcull = culling
+        self._queue_terrain(cam, gcull)
+        self._queue_rock(cam, gcull)
+        self._queue_overlay(cam, gcull)
         self._queue_entities(cam, culling)
         self._queue_dropped(cam, culling)
         click_marker = self._queue_click_marker(cam, click_marker)
         self.break_system.queue_progress_bar(self.screen.renderer, cam)
         self.break_system.queue_particles(self.screen.renderer, cam, culling)
-        self.screen.renderer.flush(LAYERS)
+
+        if persp.enabled:
+            ground = self._ground_buffer((wbuf, hbuf))
+            ground.fill(SKY_COLOR)
+            renderer.flush_to(ground, GROUND_LAYERS, offset=(mx, myt))
+            world_surf.blit(persp.warp(ground, w, h), (0, 0))
+            renderer.flush_to(world_surf, DYNAMIC_LAYERS)
+        else:
+            renderer.flush(LAYERS)
         return click_marker
+
+    def _ground_buffer(self, size: tuple[int, int]) -> pg.Surface:
+        # reused off-screen buffer the ground layers composite into before the
+        # perspective warp; rebuilt only when the world surface size changes.
+        buf = getattr(self, '_ground_buf', None)
+        if buf is None or buf.get_size() != size:
+            # forced no-alpha (not .convert()): in fullscreen the display format
+            # carries alpha, which would make the perspective warp's scaled
+            # strips blit transparent. see Perspective class doc.
+            buf = pg.Surface(size, 0, 32)
+            self._ground_buf = buf
+        return buf
 
     def _queue_terrain(self, cam, culling) -> None:
         world = self.world
@@ -770,7 +1055,7 @@ class WorldRenderer:
         if age >= CLICK_MARKER_MS:
             return None
         alpha = int(255 * (1 - age / CLICK_MARKER_MS))
-        sx, sy = cam.world_to_screen((wx, wy))
+        sx, sy = cam.project_ground((wx, wy))   # sits on the tilted ground
         size = 8
         # draw on a small SRCALPHA surface so we can apply alpha
         surf = pg.Surface((size * 2 + 4, size * 2 + 4), pg.SRCALPHA)
